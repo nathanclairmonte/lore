@@ -27,6 +27,9 @@ func PrintInitResult(r InitResult) {
 	if !r.HasRemote {
 		Blank()
 		Warn("No remote configured. Set one with:")
-		fmt.Fprintf(Out, "    cd $(lore path --repo) && git remote add origin <url>\n")
+		// print the contracted central path literally rather than
+		// `$(lore path --repo)` — `lore path` arrives in slice 2; until
+		// then the hint should be a working command the user can run.
+		fmt.Fprintf(Out, "    cd %s && git remote add origin <url>\n", config.Contract(r.CentralPath))
 	}
 }
