@@ -74,37 +74,51 @@ func runInit() error {
 				"Remove it first so lore can initialize there.",
 			)
 		}
-		// empty existing dir is fine — fall through to fresh init.
-		return freshInit(cfg.CentralRepo, false)
+		// empty existing dir is fine; fall through to fresh init.
+		return freshInit(cfg.CentralRepo)
 
 	default:
-		// no config, no dir — clean first-run.
-		return freshInit(cfg.CentralRepo, false)
+		// no config, no dir: clean first-run.
+		return freshInit(cfg.CentralRepo)
 	}
 }
 
-// freshInit performs the central.Initialize + config.WriteDefaults + print
-// success path. The recreated flag controls only the verb in the success
-// message.
+// freshInit handles the clean first-run path: no config exists yet (or an
+// empty default dir is sitting in the way). Initializes the central repo
+// AND writes the default config.
 //
 // Order matters: initialize the central repo first, THEN write the config.
 // If init fails partway through the user can re-run safely; if config
 // existed first and central init failed, we'd have an orphan config
 // pointing at a half-built repo.
-func freshInit(path string, recreated bool) error {
+func freshInit(path string) error {
 	c, err := central.Initialize(path)
 	if err != nil {
 		return err
 	}
-
-	// only write config on fresh init; recreate path is "config already
-	// exists, dir was missing" so leave config alone.
-	if !recreated {
-		if err := config.WriteDefaults(); err != nil {
-			return err
-		}
+	if err := config.WriteDefaults(); err != nil {
+		return err
 	}
+	return finishInit(c, false)
+}
 
+// recreateMissing handles the "config already points at <path> and the
+// user has just confirmed re-creating the missing dir" case. Initializes
+// the central repo at the configured path but leaves the config file
+// alone, since it already points here. Splitting this out of freshInit
+// keeps the "fresh init always writes config" invariant type-enforced.
+func recreateMissing(path string) error {
+	c, err := central.Initialize(path)
+	if err != nil {
+		return err
+	}
+	return finishInit(c, true)
+}
+
+// finishInit collects the HasRemote + config-path data the output layer
+// needs and prints the success summary. Shared between freshInit and
+// recreateMissing so the same fields render the same way.
+func finishInit(c *central.Central, recreated bool) error {
 	hasRemote, err := c.HasRemote()
 	if err != nil {
 		return err
@@ -113,7 +127,6 @@ func freshInit(path string, recreated bool) error {
 	if err != nil {
 		return err
 	}
-
 	output.PrintInitResult(output.InitResult{
 		CentralPath: c.Path,
 		ConfigPath:  configPath,
@@ -161,5 +174,5 @@ func reinitMissingDir(path string) error {
 				"directory manually and re-run.",
 		)
 	}
-	return freshInit(path, true)
+	return recreateMissing(path)
 }

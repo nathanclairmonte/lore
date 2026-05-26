@@ -78,6 +78,31 @@ func TestLoreInit_MissingDirNonInteractive(t *testing.T) {
 	require.Equal(t, 7, run([]string{"init"}))
 }
 
+func TestRecreateMissingLeavesConfigUntouched(t *testing.T) {
+	home := sandbox(t)
+	// first run lays down central dir + config.
+	require.Equal(t, 0, run([]string{"init"}))
+	configPath := filepath.Join(home, ".config/lore/config.toml")
+
+	// overwrite the config with a sentinel so we can detect any later
+	// rewrite. central_repo stays valid so Load doesn't reject it.
+	sentinel := `central_repo = "~/agent-context"` + "\n# user-edited sentinel\n"
+	require.NoError(t, os.WriteFile(configPath, []byte(sentinel), 0o644))
+
+	// nuke the central dir but leave the (now-customised) config.
+	require.NoError(t, os.RemoveAll(filepath.Join(home, "agent-context")))
+
+	// call recreateMissing directly: drives the recreate path without
+	// needing an interactive prompt. asserts the contract that recreate
+	// MUST NOT touch the config file, only the missing dir.
+	require.NoError(t, recreateMissing(filepath.Join(home, "agent-context")))
+	require.DirExists(t, filepath.Join(home, "agent-context/.git"))
+
+	got, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	require.Equal(t, sentinel, string(got), "recreateMissing must not overwrite an existing config")
+}
+
 func TestLoreHelpListsInit(t *testing.T) {
 	// no sandbox needed; --help shouldn't touch the filesystem at all,
 	// but use one anyway as a safety net.
