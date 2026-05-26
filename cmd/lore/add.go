@@ -13,10 +13,10 @@ func newAddCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "add [path]",
 		Short: "Move a project's agent directory into the central repo and link it back",
-		Long: "Onboards a project: detects its agent directory, moves it " +
-			"into the central repo at projects/<name>/<dir>/, plants an " +
-			"absolute symlink back at the original location, records the " +
-			"path locally, and commits using commit.add_template.",
+		Long: `Onboards a project: detects its agent directory, moves it
+into the central repo at projects/<name>/<dir>/, plants an
+absolute symlink back at the original location, records the
+path locally, and commits using commit.add_template.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var opts project.AddOptions

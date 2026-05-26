@@ -19,9 +19,9 @@ func newPathCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "path [name]",
 		Short: "Print the central-repo path of a tracked project (or the repo itself)",
-		Long: "Prints absolute paths suitable for shell scripting: `cd " +
-			"\"$(lore path foo)\"`. Output is unstyled so ANSI codes never " +
-			"leak into a subshell.",
+		Long: `Prints absolute paths suitable for shell scripting: ` +
+			"`cd \"$(lore path foo)\"`" +
+			`. Output is unstyled so ANSI codes never leak into a subshell.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if repoFlag {
