@@ -194,7 +194,7 @@ weird-thing   = "/opt/random-place/weird-thing"
 | 4 | Conflict / already exists | Project already tracked, name collision, symlink at expected location pointing elsewhere |
 | 5 | Refused for safety | Agent dir contains tracked files, agent dir is a symlink, nested `.git` present, gitignore picker dismissed |
 | 6 | Git / network failure | Central is behind remote (refused push), `git` operation failed, clone failed |
-| 7 | Inconsistency / unhealthy | `lore doctor` found unfixed problems, `lore status` found broken symlinks |
+| 7 | Inconsistency / unhealthy | `lore doctor` found unfixed problems, `lore status` found broken symlinks, broken config (e.g. empty `central_repo`), interactive prompt required but stdin is not a terminal |
 
 ### `lore init`
 
