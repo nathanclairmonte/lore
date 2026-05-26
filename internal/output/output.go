@@ -17,6 +17,13 @@
 //     output. Data-returning commands emit a documented JSON envelope
 //     instead. Slice 21 wires every data command; slice 03 lands the
 //     plumbing and wires `lore path`.
+//
+// Concurrency: mode, colorOverride, unicodeOverride, Out, and Err are
+// package-level mutable globals. This is intentional for a single-process
+// CLI where the cobra pre-run sets them once before any subcommand RunE
+// fires. If a future command ever fans out goroutines that print (e.g. a
+// parallel `lore status` across many projects), these need a mutex or a
+// per-call context-carried renderer; today they don't.
 package output
 
 import (
