@@ -1,0 +1,5 @@
+✓ Initialized central repository at ~/agent-context
+✓ Wrote config to ~/.config/lore/config.toml
+
+⚠ No remote configured. Set one with:
+    cd ~/agent-context && git remote add origin <url>

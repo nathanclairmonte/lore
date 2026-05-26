@@ -1,0 +1,9 @@
+✓ Project:   my-app (~/code/my-app)
+✓ Agent dir: .claude
+✓ Globally gitignored: yes
+
+→ Moved  .claude  →  ~/agent-context/projects/my-app/.claude
+→ Linked .claude  ←  ~/agent-context/projects/my-app/.claude
+✓ Committed to central repo: "feat: add my-app"
+
+Next: cd ~/agent-context && git push
