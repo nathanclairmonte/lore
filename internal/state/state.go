@@ -111,22 +111,44 @@ func (s *State) RemovePath(name string) {
 	delete(s.Paths, name)
 }
 
-// Save writes the state file, creating its parent directory if needed.
+// Save writes the state file atomically, creating its parent directory
+// if needed. Writes to a sibling tempfile then renames into place so a
+// crash or encode failure can never leave a truncated state.toml on
+// disk. lore add's rollback path leans on this: if Save errors out the
+// previous state file is still intact.
 func Save(s State) error {
 	path, err := Path()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return lerr.Wrap(lerr.CodeGenericError, err, "cannot create state directory")
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	// tempfile in the SAME directory so os.Rename is an atomic move on
+	// POSIX (cross-device renames would silently fall back to copy+remove).
+	tmp, err := os.CreateTemp(dir, "state-*.toml.tmp")
 	if err != nil {
-		return lerr.Wrap(lerr.CodeGenericError, err, "cannot open state file for writing")
+		return lerr.Wrap(lerr.CodeGenericError, err, "cannot create temporary state file")
 	}
-	defer func() { _ = f.Close() }()
-	if err := toml.NewEncoder(f).Encode(s); err != nil {
+	tmpPath := tmp.Name()
+	// cleanup defer: removes the tempfile if anything below this point
+	// errors out before the rename. once rename succeeds, the tempfile
+	// no longer exists at tmpPath, so Remove returns ErrNotExist (ignored).
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if err := toml.NewEncoder(tmp).Encode(s); err != nil {
+		_ = tmp.Close()
 		return lerr.Wrap(lerr.CodeGenericError, err, "cannot encode state")
+	}
+	if err := tmp.Close(); err != nil {
+		return lerr.Wrap(lerr.CodeGenericError, err, "cannot close temporary state file")
+	}
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return lerr.Wrap(lerr.CodeGenericError, err, "cannot set permissions on state file")
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return lerr.Wrap(lerr.CodeGenericError, err, "cannot replace state file")
 	}
 	return nil
 }

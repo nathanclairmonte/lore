@@ -134,6 +134,52 @@ func TestRemovePathNoOp(t *testing.T) {
 	st.RemovePath("never-added")
 }
 
+func TestSaveAtomicityPreservesExistingFileOnEncodeFailure(t *testing.T) {
+	withSandbox(t)
+
+	// land a known-good state on disk first.
+	good := Defaults()
+	require.NoError(t, good.AddPath("my-app", "/home/x/code/my-app"))
+	require.NoError(t, Save(good))
+
+	// simulate a write failure mid-Save: make the state directory
+	// read-only so creating the tempfile fails. atomicity contract:
+	// the previous state.toml must still be intact and loadable.
+	path, _ := Path()
+	stateDir := filepath.Dir(path)
+	require.NoError(t, os.Chmod(stateDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(stateDir, 0o755) })
+
+	next := Defaults()
+	require.NoError(t, next.AddPath("my-app", "/home/x/code/my-app"))
+	require.NoError(t, next.AddPath("second", "/home/x/code/second"))
+	err := Save(next)
+	require.Error(t, err)
+
+	// restore perms so Load can read the file, then confirm the
+	// pre-existing state survived untouched.
+	require.NoError(t, os.Chmod(stateDir, 0o755))
+	loaded, exists, err := Load()
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, good, loaded, "previous state file must survive a failed Save")
+}
+
+func TestSaveLeavesNoTempFilesBehind(t *testing.T) {
+	withSandbox(t)
+	st := Defaults()
+	require.NoError(t, st.AddPath("my-app", "/home/x/code/my-app"))
+	require.NoError(t, Save(st))
+
+	path, _ := Path()
+	entries, err := os.ReadDir(filepath.Dir(path))
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.NotContains(t, e.Name(), ".tmp",
+			"atomic Save must clean up its tempfile after a successful rename")
+	}
+}
+
 func TestAddPathSurvivesRoundTrip(t *testing.T) {
 	withSandbox(t)
 	st := Defaults()
