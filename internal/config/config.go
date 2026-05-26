@@ -165,6 +165,10 @@ func Save(cfg Config) error {
 // WriteDefaults writes the embedded commented template verbatim to the
 // config file location. Returns CodeConflict if the file already exists; the
 // caller is responsible for the higher-level "already configured" check.
+//
+// On any failure after the file is opened (write error, sync error), the
+// partial file is removed so a retry isn't permanently blocked by the
+// O_EXCL guard. ENOSPC mid-write is the motivating real-world case.
 func WriteDefaults() error {
 	path, err := Path()
 	if err != nil {
@@ -181,9 +185,16 @@ func WriteDefaults() error {
 		}
 		return lerr.Wrap(lerr.CodeGenericError, err, "cannot create config file")
 	}
-	defer f.Close()
+	success := false
+	defer func() {
+		_ = f.Close()
+		if !success {
+			_ = os.Remove(path)
+		}
+	}()
 	if _, err := f.Write(defaultConfigTOML); err != nil {
 		return lerr.Wrap(lerr.CodeGenericError, err, "cannot write config file")
 	}
+	success = true
 	return nil
 }
