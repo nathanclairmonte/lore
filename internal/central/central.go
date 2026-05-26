@@ -28,7 +28,7 @@ This repository holds per-project agentic AI context (` + "`.claude/`" + `,
 tracked project's agent directories are symlinked from their on-disk
 locations into this repo.
 
-Do not edit files here by hand while a session is running — your harness's
+Do not edit files here by hand while a session is running; your harness's
 session-end hook may overwrite them.
 `
 
@@ -64,10 +64,17 @@ func Initialize(path string) (*Central, error) {
 
 	// rollback closure: only fires on failure; only removes the dir if we
 	// were the ones who created it. callers can re-run safely afterwards.
+	// if cleanup itself fails, surface it to stderr as a secondary
+	// warning: the primary error still bubbles up, but the user needs to
+	// know they may be left with a half-built dir to clean by hand.
 	success := false
 	defer func() {
 		if !success && !preExisted {
-			_ = os.RemoveAll(path)
+			if rmErr := os.RemoveAll(path); rmErr != nil {
+				fmt.Fprintf(os.Stderr,
+					"warning: failed to clean up partial central repo at %s: %v\n",
+					path, rmErr)
+			}
 		}
 	}()
 

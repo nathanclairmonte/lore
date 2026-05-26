@@ -36,8 +36,8 @@ func TestInitializeRollsBackOnFailure(t *testing.T) {
 	require.NoError(t, os.MkdirAll(target, 0o755))
 	// place a file at .git so `git init` will fail (cannot create dir).
 	require.NoError(t, os.WriteFile(filepath.Join(target, ".git"), []byte("not a dir"), 0o644))
-	// since target pre-existed, our rollback should leave it alone —
-	// not remove it.
+	// since target pre-existed, our rollback should leave it alone
+	// rather than removing it.
 	_, err := Initialize(target)
 	require.Error(t, err)
 	require.DirExists(t, target, "pre-existing dir must not be removed by rollback")
@@ -51,7 +51,7 @@ func TestInitializeRollsBackCreatedDir(t *testing.T) {
 
 	parent := t.TempDir()
 	target := filepath.Join(parent, "agent-context")
-	// target does NOT exist yet — Initialize will create it.
+	// target does NOT exist yet; Initialize will create it.
 
 	_, err := Initialize(target)
 	require.Error(t, err)
