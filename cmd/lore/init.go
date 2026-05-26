@@ -1,6 +1,7 @@
 package main
 
 import (
+	stderrors "errors"
 	"fmt"
 
 	"github.com/nathanclairmonte/lore/internal/central"
@@ -70,8 +71,7 @@ func runInit() error {
 				"%s already exists and is not empty",
 				config.Contract(cfg.CentralRepo),
 			).WithHint(
-				"Remove it first, or use `lore init --path <other-path>` " +
-					"(coming soon) to point lore at a different location.",
+				"Remove it first so lore can initialize there.",
 			)
 		}
 		// empty existing dir is fine — fall through to fresh init.
@@ -133,7 +133,22 @@ func reinitMissingDir(path string) error {
 	)
 	yes, err := prompt.Confirm(question, false)
 	if err != nil {
-		// non-TTY case bubbles up as CodeInconsistency from prompt.
+		// non-TTY case bubbles up as CodeInconsistency from prompt with a
+		// generic hint about flags lore init doesn't accept yet. rewrap
+		// with init-specific recovery guidance so the user sees
+		// something actionable in CI / piped contexts.
+		var le *lerr.Error
+		if stderrors.As(err, &le) && le.Code == lerr.CodeInconsistency {
+			return lerr.Newf(
+				lerr.CodeInconsistency,
+				"central repo is missing at %s and stdin is not a terminal",
+				config.Contract(path),
+			).WithHint(
+				"Re-run `lore init` from an interactive shell to accept " +
+					"the re-create prompt, or recreate the directory " +
+					"manually and re-run.",
+			)
+		}
 		return err
 	}
 	if !yes {
