@@ -86,7 +86,7 @@ func Save(s State) error {
 	if err != nil {
 		return lerr.Wrap(lerr.CodeGenericError, err, "cannot open state file for writing")
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if err := toml.NewEncoder(f).Encode(s); err != nil {
 		return lerr.Wrap(lerr.CodeGenericError, err, "cannot encode state")
 	}

@@ -167,7 +167,7 @@ func Save(cfg Config) error {
 	if err != nil {
 		return lerr.Wrap(lerr.CodeGenericError, err, "cannot open config file for writing")
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	enc := toml.NewEncoder(f)
 	if err := enc.Encode(out); err != nil {
 		return lerr.Wrap(lerr.CodeGenericError, err, "cannot encode config")

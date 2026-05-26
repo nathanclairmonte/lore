@@ -33,23 +33,23 @@ var Err io.Writer = os.Stderr
 
 // Success prints a green ✓ line.
 func Success(format string, args ...any) {
-	fmt.Fprintf(Out, "%s %s\n", StyleSuccess.Render("✓"), fmt.Sprintf(format, args...))
+	_, _ = fmt.Fprintf(Out, "%s %s\n", StyleSuccess.Render("✓"), fmt.Sprintf(format, args...))
 }
 
 // Warn prints a yellow ⚠ line to stdout (warnings are part of normal output,
 // not errors).
 func Warn(format string, args ...any) {
-	fmt.Fprintf(Out, "%s %s\n", StyleWarn.Render("⚠"), fmt.Sprintf(format, args...))
+	_, _ = fmt.Fprintf(Out, "%s %s\n", StyleWarn.Render("⚠"), fmt.Sprintf(format, args...))
 }
 
 // Hint prints a dimmed informational line to stdout.
 func Hint(format string, args ...any) {
-	fmt.Fprintln(Out, StyleHint.Render(fmt.Sprintf(format, args...)))
+	_, _ = fmt.Fprintln(Out, StyleHint.Render(fmt.Sprintf(format, args...)))
 }
 
 // Blank prints an empty line.
 func Blank() {
-	fmt.Fprintln(Out)
+	_, _ = fmt.Fprintln(Out)
 }
 
 // PrintError renders a lore error to stderr with its hint, if any.
@@ -57,8 +57,8 @@ func PrintError(err error) {
 	if err == nil {
 		return
 	}
-	fmt.Fprintf(Err, "%s %s\n", StyleError.Render("✗"), err.Error())
+	_, _ = fmt.Fprintf(Err, "%s %s\n", StyleError.Render("✗"), err.Error())
 	if hint := lerr.HintOf(err); hint != "" {
-		fmt.Fprintln(Err, StyleHint.Render(hint))
+		_, _ = fmt.Fprintln(Err, StyleHint.Render(hint))
 	}
 }

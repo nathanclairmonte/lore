@@ -39,7 +39,7 @@ func PrintInitResult(r InitResult) {
 		// `$(lore path --repo)`: `lore path` arrives in slice 2; until
 		// then the hint should be a working command the user can run.
 		path := shellQuoteForCD(config.Contract(r.CentralPath), r.CentralPath)
-		fmt.Fprintf(Out, "    cd %s && git remote add origin <url>\n", path)
+		_, _ = fmt.Fprintf(Out, "    cd %s && git remote add origin <url>\n", path)
 	}
 }
 
