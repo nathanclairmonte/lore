@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
@@ -127,6 +128,18 @@ func Load() (cfg Config, exists bool, err error) {
 		return Config{}, false, lerr.Wrap(lerr.CodeGenericError, err, "malformed config file at "+path)
 	}
 	expandPaths(&cfg)
+
+	// reject obviously-broken configs at the boundary rather than letting
+	// an empty central_repo flow downstream and surface as a confusing
+	// "central path is empty" deep inside central.Initialize. only checked
+	// on the file-present branch: Defaults() always has a non-empty value.
+	if strings.TrimSpace(cfg.CentralRepo) == "" {
+		return Config{}, false, lerr.Newf(
+			lerr.CodeInconsistency,
+			"config at %s has empty central_repo",
+			path,
+		).WithHint("set central_repo to a path, or remove the file to restore defaults")
+	}
 	return cfg, true, nil
 }
 

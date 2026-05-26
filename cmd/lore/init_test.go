@@ -103,6 +103,17 @@ func TestRecreateMissingLeavesConfigUntouched(t *testing.T) {
 	require.Equal(t, sentinel, string(got), "recreateMissing must not overwrite an existing config")
 }
 
+func TestLoreInit_RejectsEmptyCentralRepoInConfig(t *testing.T) {
+	home := sandbox(t)
+	configPath := filepath.Join(home, ".config/lore/config.toml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o755))
+	require.NoError(t, os.WriteFile(configPath, []byte(`central_repo = ""`+"\n"), 0o644))
+
+	// broken config: empty central_repo must be rejected at Load with
+	// CodeInconsistency (exit 7), not surface deeper in central.Initialize.
+	require.Equal(t, 7, run([]string{"init"}))
+}
+
 func TestLoreHelpListsInit(t *testing.T) {
 	// no sandbox needed; --help shouldn't touch the filesystem at all,
 	// but use one anyway as a safety net.

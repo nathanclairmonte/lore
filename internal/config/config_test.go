@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	lerrPkg "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -140,6 +141,23 @@ func TestLoadMalformedReturnsError(t *testing.T) {
 
 	_, _, err := Load()
 	require.Error(t, err)
+}
+
+func TestLoadRejectsEmptyCentralRepo(t *testing.T) {
+	withSandbox(t)
+	path, _ := Path()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	// explicitly empty central_repo: user hand-edited their config into
+	// a broken state. should be rejected at Load with CodeInconsistency
+	// rather than flowing downstream to surface elsewhere.
+	require.NoError(t, os.WriteFile(path, []byte(`central_repo = ""`+"\n"), 0o644))
+
+	_, _, err := Load()
+	require.Error(t, err)
+
+	var le *lerrPkg.Error
+	require.ErrorAs(t, err, &le)
+	require.Equal(t, lerrPkg.CodeInconsistency, le.Code)
 }
 
 func TestExpand(t *testing.T) {
