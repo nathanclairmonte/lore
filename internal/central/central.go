@@ -1,9 +1,6 @@
 // Package central manages the lore central repository as a typed handle.
 // It owns the projects/<name>/<agent-dir>/ layout and the git operations
 // needed to maintain it.
-//
-// Slice 1 ships only Initialize, Open, and HasRemote. AddProject /
-// RemoveProject / RenameProject arrive with the slices that need them.
 package central
 
 import (

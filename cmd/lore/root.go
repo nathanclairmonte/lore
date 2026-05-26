@@ -20,5 +20,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 	}
 	root.AddCommand(newInitCmd())
+	root.AddCommand(newAddCmd())
+	root.AddCommand(newPathCmd())
 	return root
 }
