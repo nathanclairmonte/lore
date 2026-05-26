@@ -26,6 +26,11 @@ func newPathCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if repoFlag {
 				if len(args) > 0 {
+					// usage errors print the cobra usage block so the
+					// user sees how the command is meant to be called.
+					// root has SilenceUsage: true, so cobra won't do this
+					// automatically; we opt in here for the usage-error path.
+					_ = cmd.Usage()
 					return lerr.New(lerr.CodeGenericError,
 						"lore path: --repo takes no arguments")
 				}
@@ -37,6 +42,7 @@ func newPathCmd() *cobra.Command {
 				return nil
 			}
 			if len(args) != 1 {
+				_ = cmd.Usage()
 				return lerr.New(lerr.CodeGenericError,
 					"lore path requires a project name (or --repo)")
 			}
