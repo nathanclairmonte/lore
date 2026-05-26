@@ -16,9 +16,18 @@ import (
 // to CodeGitNetwork.
 //
 // Semantics of `git check-ignore -q <path>`:
-//   - exit 0   -> path matches a gitignore rule          -> (true, nil)
-//   - exit 1   -> path does not match any gitignore rule -> (false, nil)
-//   - other    -> real failure (not in a git repo, etc.) -> (false, *lerr.Error{CodeGitNetwork})
+//   - exit 0      -> path matches a gitignore rule          -> (true, nil)
+//   - exit 1      -> path does not match any gitignore rule -> (false, nil)
+//   - exit 128    -> workdir is not inside a git repo       -> (false, nil)
+//   - other       -> real failure                           -> (false, *lerr.Error{CodeGitNetwork})
+//
+// The "not a git repo" case is folded into the not-ignored answer so
+// callers (notably `lore add`'s gitignore precheck) surface the standard
+// CodeRefusedSafety message and the "add it to your global .gitignore"
+// hint, rather than a confusing CodeGitNetwork. Conservatively reporting
+// "not ignored" preserves the safety property: a non-git project is
+// only safe to onboard when its agent dir is globally gitignored anyway,
+// since the user may later `git init` and commit.
 //
 // A missing git binary maps to CodeSetupMissing for consistency with Run.
 func CheckIgnore(workdir, path string) (bool, error) {
@@ -38,8 +47,18 @@ func CheckIgnore(workdir, path string) (bool, error) {
 			WithHint("install git and re-run; on macOS try `xcode-select --install`")
 	}
 	var exitErr *exec.ExitError
-	if stderrors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-		return false, nil
+	if stderrors.As(err, &exitErr) {
+		switch exitErr.ExitCode() {
+		case 1:
+			return false, nil
+		case 128:
+			// git's universal "fatal:" exit code. The only case we want
+			// to absorb here is "not a git repository"; anything else
+			// (corrupt repo, locked index, etc.) is a real failure.
+			if strings.Contains(stderr.String(), "not a git repository") {
+				return false, nil
+			}
+		}
 	}
 	msg := fmt.Sprintf("git check-ignore %s failed", path)
 	if s := strings.TrimSpace(stderr.String()); s != "" {

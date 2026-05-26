@@ -48,10 +48,14 @@ func TestCheckIgnoreNotMatched(t *testing.T) {
 func TestCheckIgnoreNonGitDirectory(t *testing.T) {
 	dir := t.TempDir() // no `git init`
 
+	// `lore add` on a non-git project must fall through to the
+	// "not gitignored" branch rather than surface a CodeGitNetwork.
+	// (false, nil) lets the orchestrator emit the standard
+	// CodeRefusedSafety message; the user still needs a global
+	// gitignore entry in case they later `git init`.
 	ignored, err := CheckIgnore(dir, ".claude")
-	require.Error(t, err)
+	require.NoError(t, err)
 	require.False(t, ignored)
-	require.Equal(t, lerr.CodeGitNetwork, lerr.CodeOf(err))
 }
 
 func TestCheckIgnoreMissingGitBinary(t *testing.T) {
