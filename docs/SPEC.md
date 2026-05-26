@@ -220,7 +220,7 @@ lore init --no-interactive                               # use all defaults, no 
 
 **Non-interactive behavior (any flag passed, or `--no-interactive`):**
 
-- Without `--from`: `git init` a new repo at `central_repo` (from `--path` or config default), write a default `README.md`, write `~/.config/lore/config.toml`.
+- Without `--from`: `git init` a new repo at `central_repo` (from `--path` or config default), write a default `README.md` plus an empty `projects/.gitkeep`, make a single bootstrap commit (`chore: initialize lore central repository`, authored as `lore <lore@localhost>` with gpg signing disabled so users without a configured git identity or signing key aren't blocked from the very first command), then write `~/.config/lore/config.toml`. If any step after the directory is created fails, the directory is removed so a retry sees a clean slate.
 - With `--from`: `git clone` the remote to `central_repo`. Write the config.
 - If `--path <path>` is passed and `<path>` already contains a git repo, **adopt** it rather than re-initializing. Lets users point lore at a manually-prepared repo.
 - If `--path` is passed, **update `central_repo` in config to the new path** (even if a previous central repo was configured elsewhere). The previous repo on disk is left untouched; switch back later via `lore use <old-path>` or another `lore init --path`.
