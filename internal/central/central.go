@@ -74,13 +74,16 @@ func Initialize(path string) (*Central, error) {
 	if _, err := git.Run(path, "add", "README.md", "projects/.gitkeep"); err != nil {
 		return nil, err
 	}
-	// supply identity inline so users who haven't configured a global git
-	// identity yet (common on fresh machines) don't hit "author identity
-	// unknown" on lore's very first commit. Subsequent user-initiated
-	// commits (sync, add, etc.) use the user's real git identity.
+	// supply identity AND disable gpg signing inline so users on fresh
+	// machines (no global git identity) and users with commit.gpgsign=true
+	// (no signing key for lore@localhost) can both bootstrap. lore's
+	// bootstrap commit is system content, not user content; user-authored
+	// commits in later slices use the user's real identity and signing
+	// config.
 	if _, err := git.Run(path,
 		"-c", "user.name=lore",
 		"-c", "user.email=lore@localhost",
+		"-c", "commit.gpgsign=false",
 		"commit", "-m", "chore: initialize lore central repository",
 	); err != nil {
 		return nil, err
