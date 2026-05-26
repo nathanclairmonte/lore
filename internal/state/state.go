@@ -1,9 +1,6 @@
 // Package state loads and saves lore's per-machine local state file
 // (~/.local/state/lore/state.toml). State is never committed; it's a path
 // mapping (project name -> on-disk path) regeneratable by `lore link`.
-//
-// Slice 1 ships the typed module + Load/Save only. Query methods (AddPath,
-// PathFor) and the multi-path schema land in later slices that need them.
 package state
 
 import (
@@ -71,6 +68,47 @@ func Load() (st State, exists bool, err error) {
 		st.Paths = map[string]string{}
 	}
 	return st, true, nil
+}
+
+// AddPath records project name -> absolute path on the in-memory state.
+// Idempotent on same (name, path); rejects same name with a different
+// path so callers don't silently clobber tracked locations.
+//
+// Does NOT persist; callers control when to Save so multi-step flows
+// (lore add) can roll back without leaving a half-written state file.
+func (s *State) AddPath(name, path string) error {
+	if s.Paths == nil {
+		s.Paths = map[string]string{}
+	}
+	if existing, ok := s.Paths[name]; ok {
+		if existing == path {
+			return nil
+		}
+		return lerr.Newf(lerr.CodeConflict,
+			"project %q is already tracked at %s", name, existing)
+	}
+	s.Paths[name] = path
+	return nil
+}
+
+// PathFor returns the absolute path recorded for name. Second return is
+// false when the project isn't tracked.
+func (s *State) PathFor(name string) (string, bool) {
+	if s.Paths == nil {
+		return "", false
+	}
+	p, ok := s.Paths[name]
+	return p, ok
+}
+
+// RemovePath drops the mapping for name. No-op when not tracked.
+//
+// Does NOT persist; see AddPath for the rationale.
+func (s *State) RemovePath(name string) {
+	if s.Paths == nil {
+		return
+	}
+	delete(s.Paths, name)
 }
 
 // Save writes the state file, creating its parent directory if needed.
