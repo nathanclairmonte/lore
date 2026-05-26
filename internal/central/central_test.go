@@ -27,6 +27,40 @@ func TestInitializeCreatesDirAndRepo(t *testing.T) {
 	require.NotEmpty(t, out)
 }
 
+func TestInitializeRollsBackOnFailure(t *testing.T) {
+	// Force the bootstrap commit to fail by pointing git at a path that
+	// already contains a file where .git/ would land. git init refuses
+	// when .git exists as a non-dir.
+	parent := t.TempDir()
+	target := filepath.Join(parent, "agent-context")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+	// place a file at .git so `git init` will fail (cannot create dir).
+	require.NoError(t, os.WriteFile(filepath.Join(target, ".git"), []byte("not a dir"), 0o644))
+	// since target pre-existed, our rollback should leave it alone —
+	// not remove it.
+	_, err := Initialize(target)
+	require.Error(t, err)
+	require.DirExists(t, target, "pre-existing dir must not be removed by rollback")
+}
+
+func TestInitializeRollsBackCreatedDir(t *testing.T) {
+	// emptied PATH forces exec.Command("git", ...) to fail with
+	// exec.ErrNotFound at git.Init. Initialize will have already created
+	// the target dir via MkdirAll; the deferred rollback must remove it.
+	t.Setenv("PATH", "")
+
+	parent := t.TempDir()
+	target := filepath.Join(parent, "agent-context")
+	// target does NOT exist yet — Initialize will create it.
+
+	_, err := Initialize(target)
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeSetupMissing, lerr.CodeOf(err))
+
+	_, statErr := os.Stat(target)
+	require.True(t, os.IsNotExist(statErr), "Initialize must remove the dir it created on failure")
+}
+
 func TestInitializeIntoExistingEmptyDir(t *testing.T) {
 	dir := t.TempDir() // t.TempDir returns an empty existing dir
 	_, err := Initialize(dir)

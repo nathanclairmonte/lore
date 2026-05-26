@@ -39,16 +39,38 @@ type Central struct {
 
 // Initialize creates path (if missing), runs git init, lays down the
 // canonical repo structure (README.md + projects/.gitkeep), and makes an
-// initial commit so the repo isn't in unborn-HEAD state. Caller is
-// responsible for higher-level checks (e.g. dir non-empty). Returns the
-// handle on success.
+// initial commit so the repo isn't in unborn-HEAD state.
+//
+// Atomicity: if Initialize created the directory and any step after the
+// MkdirAll fails, the directory is removed before returning. This means a
+// retry sees a clean slate rather than a half-built repo. If path already
+// existed when we were called, we leave it alone on failure (it's not ours
+// to delete).
+//
+// Caller is responsible for higher-level checks like "is the dir non-empty".
 func Initialize(path string) (*Central, error) {
 	if path == "" {
 		return nil, lerr.New(lerr.CodeGenericError, "central path is empty")
 	}
+
+	preExisted, err := Exists(path)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return nil, lerr.Wrap(lerr.CodeGenericError, err, "cannot create central directory")
 	}
+
+	// rollback closure: only fires on failure; only removes the dir if we
+	// were the ones who created it. callers can re-run safely afterwards.
+	success := false
+	defer func() {
+		if !success && !preExisted {
+			_ = os.RemoveAll(path)
+		}
+	}()
+
 	if err := git.Init(path); err != nil {
 		return nil, err
 	}
@@ -88,6 +110,7 @@ func Initialize(path string) (*Central, error) {
 	); err != nil {
 		return nil, err
 	}
+	success = true
 	return &Central{Path: path}, nil
 }
 
