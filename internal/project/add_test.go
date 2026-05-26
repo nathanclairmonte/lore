@@ -193,6 +193,114 @@ func TestAddMissingProjectPath(t *testing.T) {
 	require.Equal(t, lerr.CodeNotFound, lerr.CodeOf(err))
 }
 
+// snapshotDir lists every entry under root (recursively, by relative
+// path) so a refusal test can assert "nothing changed". Returning a sorted
+// slice keeps the comparison deterministic across filesystems.
+func snapshotDir(t *testing.T, root string) []string {
+	t.Helper()
+	var entries []string
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(root, p)
+		if relErr != nil {
+			return relErr
+		}
+		entries = append(entries, rel)
+		return nil
+	})
+	require.NoError(t, err)
+	return entries
+}
+
+func TestAddRefusesWhenAgentDirHasTrackedFiles(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+
+	// move .claude into the project's index so check-safety's tracked-
+	// files gate fires. addSandbox already wired .git/info/exclude to
+	// ignore .claude, so we use -f to force it past the ignore rule.
+	_, err := git.Run(projectRoot, "add", "-f", ".claude/CLAUDE.md")
+	require.NoError(t, err)
+
+	_, err = Add(AddOptions{ProjectPath: projectRoot})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
+	require.Contains(t, err.Error(), "tracked by this repo's git")
+	require.Contains(t, err.Error(), "git rm --cached -r .claude")
+}
+
+func TestAddRefusesWhenAgentDirHasNestedGit(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	require.NoError(t, os.Mkdir(filepath.Join(projectRoot, ".claude", ".git"), 0o755))
+
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
+	require.Contains(t, err.Error(), "nested git repository")
+}
+
+func TestAddRefusesWhenAgentDirIsSymlink(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	// replace the real .claude with a symlink pointing somewhere else.
+	require.NoError(t, os.RemoveAll(filepath.Join(projectRoot, ".claude")))
+	target := filepath.Join(t.TempDir(), "somewhere")
+	require.NoError(t, os.Mkdir(target, 0o755))
+	require.NoError(t, os.Symlink(target, filepath.Join(projectRoot, ".claude")))
+
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
+	require.Contains(t, err.Error(), "already a symlink to")
+	require.Contains(t, err.Error(), target)
+}
+
+func TestAddRefusesReportsAllViolationsAtOnce(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	// .claude trips two checks at once: tracked file + nested .git.
+	_, err := git.Run(projectRoot, "add", "-f", ".claude/CLAUDE.md")
+	require.NoError(t, err)
+	require.NoError(t, os.Mkdir(filepath.Join(projectRoot, ".claude", ".git"), 0o755))
+
+	_, err = Add(AddOptions{ProjectPath: projectRoot})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
+	// both messages must surface so the user fixes everything in one round.
+	require.Contains(t, err.Error(), "tracked by this repo's git")
+	require.Contains(t, err.Error(), "nested git repository")
+}
+
+func TestAddRefusalLeavesFilesystemUntouched(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+
+	// arrange a refusal (nested .git is cheap to set up).
+	require.NoError(t, os.Mkdir(filepath.Join(projectRoot, ".claude", ".git"), 0o755))
+
+	projectBefore := snapshotDir(t, projectRoot)
+	centralBefore := snapshotDir(t, centralPath)
+	commitBefore, err := git.Run(centralPath, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	_, err = Add(AddOptions{ProjectPath: projectRoot})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
+
+	// every entry list and the central HEAD commit must be byte-identical.
+	require.Equal(t, projectBefore, snapshotDir(t, projectRoot),
+		"project dir must not change on refusal (no move, no symlink)")
+	require.Equal(t, centralBefore, snapshotDir(t, centralPath),
+		"central repo dir must not change on refusal")
+	commitAfter, err := git.Run(centralPath, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	require.Equal(t, commitBefore, commitAfter,
+		"no new commit must land on central when add is refused")
+
+	// state has not gained an entry for this project either.
+	st, _, _ := state.Load()
+	_, ok := st.PathFor("my-app")
+	require.False(t, ok)
+}
+
 func TestRenderAddTemplate(t *testing.T) {
 	require.Equal(t, "feat: add my-app",
 		renderAddTemplate("feat: add {project}", "my-app"))

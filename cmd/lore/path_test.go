@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -60,4 +61,36 @@ func TestLorePath_RepoRejectsExtraArgs(t *testing.T) {
 func TestLorePath_NoArgsErrors(t *testing.T) {
 	addCmdSandbox(t)
 	require.Equal(t, 1, run([]string{"path"}))
+}
+
+func TestLorePath_JSONEnvelope(t *testing.T) {
+	home, projectRoot := addCmdSandbox(t)
+	require.Equal(t, 0, run([]string{"add", projectRoot}))
+
+	buf := capturedOut(t)
+	require.Equal(t, 0, run([]string{"--json", "path", "my-app"}))
+
+	// envelope must parse as {"path": "<abs path>"} - no other keys,
+	// no human noise. agents key off the schema, so this is the
+	// regression-proof shape to assert.
+	var got struct {
+		Path string `json:"path"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	expected := filepath.Join(home, "agent-context", "projects", "my-app", ".claude")
+	require.Equal(t, expected, got.Path)
+}
+
+func TestLorePath_JSONEnvelope_Repo(t *testing.T) {
+	home, projectRoot := addCmdSandbox(t)
+	require.Equal(t, 0, run([]string{"add", projectRoot}))
+
+	buf := capturedOut(t)
+	require.Equal(t, 0, run([]string{"--json", "path", "--repo"}))
+
+	var got struct {
+		Path string `json:"path"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	require.Equal(t, filepath.Join(home, "agent-context"), got.Path)
 }

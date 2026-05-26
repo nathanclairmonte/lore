@@ -108,22 +108,66 @@ func TestHasRemote(t *testing.T) {
 	require.True(t, has)
 }
 
-func TestIsEmpty(t *testing.T) {
+func TestIsEmptyNonExistent(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	ok, err := IsEmpty(missing)
 	require.NoError(t, err)
 	require.True(t, ok, "non-existent dir reports as empty")
+}
 
-	empty := t.TempDir()
-	ok, err = IsEmpty(empty)
-	require.NoError(t, err)
-	require.True(t, ok)
-
-	nonEmpty := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(nonEmpty, "f"), []byte("x"), 0o644))
-	ok, err = IsEmpty(nonEmpty)
-	require.NoError(t, err)
-	require.False(t, ok)
+func TestIsEmpty(t *testing.T) {
+	cases := []struct {
+		name    string
+		entries []string // file names to create at the root of a fresh tempdir
+		want    bool
+	}{
+		{
+			name:    "truly empty",
+			entries: nil,
+			want:    true,
+		},
+		{
+			name:    "only .DS_Store",
+			entries: []string{".DS_Store"},
+			want:    true,
+		},
+		{
+			name:    "all four denylist names",
+			entries: []string{".DS_Store", "Thumbs.db", "desktop.ini", ".localized"},
+			want:    true,
+		},
+		{
+			name:    "one regular file",
+			entries: []string{"f"},
+			want:    false,
+		},
+		{
+			name: ".DS_Store plus a regular file",
+			// the denylist short-circuits per-entry, so a single non-junk
+			// file is enough to flip the dir back to non-empty.
+			entries: []string{".DS_Store", "f"},
+			want:    false,
+		},
+		{
+			name: "non-denylisted dotfile counts as content",
+			// proves we are NOT just stripping all dotfiles: a user who
+			// genuinely places `.envrc` (or `.gitkeep`) must be respected.
+			entries: []string{".envrc"},
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range tc.entries {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, name),
+					[]byte(""), 0o644))
+			}
+			got, err := IsEmpty(dir)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func TestExists(t *testing.T) {
