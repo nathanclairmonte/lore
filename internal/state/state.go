@@ -74,9 +74,23 @@ func Load() (st State, exists bool, err error) {
 // Idempotent on same (name, path); rejects same name with a different
 // path so callers don't silently clobber tracked locations.
 //
+// Rejects empty names, empty paths, and non-absolute paths so a
+// misbehaving caller can't poison state with values that would later
+// fail to round-trip or resolve.
+//
 // Does NOT persist; callers control when to Save so multi-step flows
 // (lore add) can roll back without leaving a half-written state file.
 func (s *State) AddPath(name, path string) error {
+	if name == "" {
+		return lerr.New(lerr.CodeGenericError, "project name cannot be empty")
+	}
+	if path == "" {
+		return lerr.New(lerr.CodeGenericError, "project path cannot be empty")
+	}
+	if !filepath.IsAbs(path) {
+		return lerr.Newf(lerr.CodeGenericError,
+			"project path must be absolute, got %q", path)
+	}
 	if s.Paths == nil {
 		s.Paths = map[string]string{}
 	}

@@ -134,6 +134,30 @@ func TestRemovePathNoOp(t *testing.T) {
 	st.RemovePath("never-added")
 }
 
+func TestAddPathRejectsEmptyName(t *testing.T) {
+	st := Defaults()
+	err := st.AddPath("", "/home/x/code/my-app")
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeGenericError, lerr.CodeOf(err))
+}
+
+func TestAddPathRejectsEmptyPath(t *testing.T) {
+	st := Defaults()
+	err := st.AddPath("my-app", "")
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeGenericError, lerr.CodeOf(err))
+}
+
+func TestAddPathRejectsRelativePath(t *testing.T) {
+	st := Defaults()
+	err := st.AddPath("my-app", "code/my-app")
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeGenericError, lerr.CodeOf(err))
+	// no half-written entry left behind on rejection.
+	_, ok := st.PathFor("my-app")
+	require.False(t, ok)
+}
+
 func TestSaveAtomicityPreservesExistingFileOnEncodeFailure(t *testing.T) {
 	withSandbox(t)
 
