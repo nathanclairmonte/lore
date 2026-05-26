@@ -148,9 +148,29 @@ func (c *Central) HasRemote() (bool, error) {
 	return out != "", nil
 }
 
-// IsEmpty reports whether dir is empty or doesn't exist. Used by callers
-// who need to decide whether to refuse onboarding a non-empty default
-// location. A non-existent dir counts as empty.
+// osMetadataNames is the static denylist of cross-platform OS-generated
+// files that should not count as user content when deciding whether a
+// directory is effectively empty. Intentionally small; expand only on a
+// real reported case rather than speculatively. .DS_Store is macOS
+// Finder; Thumbs.db and desktop.ini are Windows Explorer (often appearing
+// on SMB / sync mounts touched from a Windows host); .localized is the
+// macOS Finder marker that turns localized folder names on.
+var osMetadataNames = map[string]struct{}{
+	".DS_Store":   {},
+	"Thumbs.db":   {},
+	"desktop.ini": {},
+	".localized":  {},
+}
+
+// IsEmpty reports whether dir is empty (or contains only known OS-metadata
+// junk), or doesn't exist. Used by `lore init` to decide whether to refuse
+// onboarding a non-empty default location.
+//
+// The denylist exists because `ls` hides dotfiles by default: a user on
+// macOS with only a `.DS_Store` in ~/agent-context sees an apparently
+// empty dir but `lore init` would refuse, producing a confusing error.
+// The denylist is deliberately narrow (four well-known names); a user who
+// genuinely places `.foo` in this dir is respected.
 func IsEmpty(dir string) (bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -159,7 +179,12 @@ func IsEmpty(dir string) (bool, error) {
 		}
 		return false, lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot inspect %s", dir))
 	}
-	return len(entries) == 0, nil
+	for _, e := range entries {
+		if _, junk := osMetadataNames[e.Name()]; !junk {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // Exists reports whether path exists on disk (file or directory).
