@@ -112,12 +112,15 @@ func Add(opts AddOptions) (AddResult, error) {
 			WithHint("remove the stale symlink and re-run, or run `lore doctor` once it ships")
 	}
 
-	// safety gate runs BEFORE DetectAgentDir. DetectAgentDir skips
-	// symlinked candidates by design (the post-add steady-state is a
-	// symlink into central) which would hide the slice-3 agent-dir-is-
-	// symlink case from any post-detect check. running it first means
-	// the user sees the right refusal even when DetectAgentDir would
-	// have returned "no agent dir found".
+	// safety gate runs BEFORE DetectAgentDir. CheckSafety picks the
+	// same candidate DetectAgentDir would pick (first existing dir or
+	// symlink in priority order) and checks only that one - lore polices
+	// what it would manage, not what it ignores. Running it before
+	// DetectAgentDir lets the agent-dir-is-symlink case surface as a
+	// proper refusal: DetectAgentDir intentionally skips symlinks (the
+	// post-add steady-state is a symlink into central), so a stale
+	// symlinked .claude would otherwise produce a confusing "no agent
+	// dir found".
 	violations, err := detect.CheckSafety(projectPath, cfg.AgentDirs)
 	if err != nil {
 		return AddResult{}, err

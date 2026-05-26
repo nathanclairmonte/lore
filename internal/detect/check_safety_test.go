@@ -82,32 +82,55 @@ func TestCheckSafetyAgentDirSymlink(t *testing.T) {
 		"symlink violation must name the target so the user knows what they pointed at")
 }
 
-func TestCheckSafetyAllThreeAtOnce(t *testing.T) {
+func TestCheckSafetyAggregatesViolationsForOneCandidate(t *testing.T) {
 	dir := safetySandbox(t)
-	// .claude is a real dir with a tracked file AND a nested .git.
+	// .claude is a real dir with a tracked file AND a nested .git: both
+	// dir-only checks must fire so the user fixes everything in one
+	// round-trip rather than playing whack-a-mole across retries.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".claude", "CLAUDE.md"),
 		[]byte("ctx"), 0o644))
 	_, err := git.Run(dir, "add", ".claude/CLAUDE.md")
 	require.NoError(t, err)
 	require.NoError(t, os.Mkdir(filepath.Join(dir, ".claude", ".git"), 0o755))
-	// .cursor is a symlink so the third check fires too. CheckSafety
-	// iterates all candidates, so multi-candidate is the only way to see
-	// all three at once (a single dir can't be both a real dir AND a
-	// symlink).
-	target := filepath.Join(t.TempDir(), "elsewhere")
-	require.NoError(t, os.Mkdir(target, 0o755))
-	require.NoError(t, os.Symlink(target, filepath.Join(dir, ".cursor")))
+
+	vs, err := CheckSafety(dir, []string{".claude"})
+	require.NoError(t, err)
+	require.ElementsMatch(t,
+		[]ViolationKind{ViolationTrackedFiles, ViolationNestedGit},
+		kinds(vs),
+		"all applicable dir-only violations must surface in one pass")
+}
+
+func TestCheckSafetyOnlyChecksFirstManagedCandidate(t *testing.T) {
+	// the key new-design invariant: a clean higher-priority candidate
+	// is what lore will adopt, so a problematic lower-priority candidate
+	// must NOT trigger a refusal - lore would never touch it. otherwise
+	// users with a stale .cursor would be blocked from onboarding a
+	// fresh .claude they actually care about.
+	dir := safetySandbox(t)
+	// .claude is the clean, untracked dir created by safetySandbox.
+	// .cursor has a nested .git (would fire if it were checked).
+	require.NoError(t, os.Mkdir(filepath.Join(dir, ".cursor"), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, ".cursor", ".git"), 0o755))
 
 	vs, err := CheckSafety(dir, []string{".claude", ".cursor"})
 	require.NoError(t, err)
-	require.ElementsMatch(t,
-		[]ViolationKind{
-			ViolationTrackedFiles,
-			ViolationNestedGit,
-			ViolationAgentDirSymlink,
-		},
-		kinds(vs),
-		"all applicable violations must surface in one pass")
+	require.Empty(t, vs, "lower-priority candidates must not be probed when a higher-priority one is selected")
+}
+
+func TestCheckSafetyFallsThroughToLaterCandidate(t *testing.T) {
+	// when the highest-priority candidate doesn't exist (or is a regular
+	// file, which DetectAgentDir also skips), the next existing one is
+	// the candidate lore would manage, and that's what safety checks.
+	dir := safetySandbox(t)
+	require.NoError(t, os.RemoveAll(filepath.Join(dir, ".claude")))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, ".cursor"), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, ".cursor", ".git"), 0o755))
+
+	vs, err := CheckSafety(dir, []string{".claude", ".cursor"})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []ViolationKind{ViolationNestedGit}, kinds(vs))
+	require.Equal(t, ".cursor", vs[0].Name, "violation must point at the candidate actually selected")
 }
 
 func TestCheckSafetySymlinkSkipsNestedAndTrackedChecks(t *testing.T) {
