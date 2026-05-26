@@ -37,8 +37,9 @@ type Central struct {
 	Path string // absolute path
 }
 
-// Initialize creates path (if missing), runs git init, writes README, and
-// makes an initial commit so the repo isn't in unborn-HEAD state. Caller is
+// Initialize creates path (if missing), runs git init, lays down the
+// canonical repo structure (README.md + projects/.gitkeep), and makes an
+// initial commit so the repo isn't in unborn-HEAD state. Caller is
 // responsible for higher-level checks (e.g. dir non-empty). Returns the
 // handle on success.
 func Initialize(path string) (*Central, error) {
@@ -56,7 +57,21 @@ func Initialize(path string) (*Central, error) {
 	if err := os.WriteFile(readmePath, []byte(readmeBody), 0o644); err != nil {
 		return nil, lerr.Wrap(lerr.CodeGenericError, err, "cannot write README.md")
 	}
-	if _, err := git.Run(path, "add", "README.md"); err != nil {
+
+	// SPEC's central layout puts every tracked project under projects/.
+	// laying it down now (with a .gitkeep so git tracks the empty dir)
+	// means `lore use` and later structural checks see the canonical
+	// shape from the very first commit.
+	projectsDir := filepath.Join(path, "projects")
+	if err := os.MkdirAll(projectsDir, 0o755); err != nil {
+		return nil, lerr.Wrap(lerr.CodeGenericError, err, "cannot create projects directory")
+	}
+	gitkeep := filepath.Join(projectsDir, ".gitkeep")
+	if err := os.WriteFile(gitkeep, nil, 0o644); err != nil {
+		return nil, lerr.Wrap(lerr.CodeGenericError, err, "cannot write projects/.gitkeep")
+	}
+
+	if _, err := git.Run(path, "add", "README.md", "projects/.gitkeep"); err != nil {
 		return nil, err
 	}
 	// supply identity inline so users who haven't configured a global git

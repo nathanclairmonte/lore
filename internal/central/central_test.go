@@ -18,6 +18,8 @@ func TestInitializeCreatesDirAndRepo(t *testing.T) {
 
 	require.DirExists(t, filepath.Join(dir, ".git"))
 	require.FileExists(t, filepath.Join(dir, "README.md"))
+	require.DirExists(t, filepath.Join(dir, "projects"))
+	require.FileExists(t, filepath.Join(dir, "projects", ".gitkeep"))
 
 	// initial commit exists; HEAD resolves.
 	out, err := git.Run(dir, "rev-parse", "HEAD")
