@@ -1,0 +1,29 @@
+# Path to the central agent-context repository.
+central_repo = "~/agent-context"
+
+# Roots that `lore link --all` scans for project checkouts.
+# Supports multiple roots for developers whose projects live in
+# more than one parent directory.
+projects_roots = [
+  "~/Canonical/git-repos",
+  "~/PersonalProjects/git-repos",
+]
+
+# How deep to recurse under each root when scanning.
+projects_root_depth = 2
+
+# Agent directory names to auto-detect during `lore add`.
+# First match wins; user can override with --dir.
+agent_dirs = [".claude", ".agents", ".cursor", ".aider"]
+
+# Commit behaviour for lore's own operations.
+[commit]
+auto = true
+add_template     = "feat: add {project}"
+rm_template      = "chore: remove {project}"
+mv_template      = "refactor: rename {old} to {new}"
+sync_template    = "chore: sync ({projects})"
+
+# Sync behaviour (used by `lore sync`).
+[sync]
+auto_push = false
