@@ -17,7 +17,11 @@ type InitResult struct {
 
 // PrintInitResult prints the success summary plus the "no remote configured"
 // hint when applicable. Paths are contracted back to `~/` for readability.
+// Suppressed in JSON mode (slice 21 will wire a typed envelope).
 func PrintInitResult(r InitResult) {
+	if mode == ModeJSON {
+		return
+	}
 	verb := "Initialized"
 	if r.Recreated {
 		verb = "Re-created"

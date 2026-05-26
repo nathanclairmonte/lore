@@ -28,7 +28,13 @@ type AddResult struct {
 //
 //   - Already-tracked re-run: single ✓ line. Idempotency is meant to be
 //     quiet rather than re-printing the full block.
+//
+// Suppressed in JSON mode: slice 21 will wire a typed envelope; for now
+// the human block is just skipped so script callers don't get noise.
 func PrintAddResult(r AddResult) {
+	if mode == ModeJSON {
+		return
+	}
 	if r.AlreadyTracked {
 		Success("Project %s is already tracked at %s",
 			r.ProjectName, config.Contract(r.CentralPath))
@@ -39,12 +45,14 @@ func PrintAddResult(r AddResult) {
 	Success("Agent dir: %s", r.AgentDirName)
 	Success("Globally gitignored: yes")
 	Blank()
+	g := activeGlyphs()
+	pathStyle := stylePath()
 	_, _ = fmt.Fprintf(Out, "%s Moved  %s  %s  %s\n",
-		StylePath.Render("→"), r.AgentDirName,
-		StylePath.Render("→"), config.Contract(r.CentralPath))
+		pathStyle.Render(g.arrowRight), r.AgentDirName,
+		pathStyle.Render(g.arrowRight), config.Contract(r.CentralPath))
 	_, _ = fmt.Fprintf(Out, "%s Linked %s  %s  %s\n",
-		StylePath.Render("→"), r.AgentDirName,
-		StylePath.Render("←"), config.Contract(r.CentralPath))
+		pathStyle.Render(g.arrowRight), r.AgentDirName,
+		pathStyle.Render(g.arrowLeft), config.Contract(r.CentralPath))
 	Success("Committed to central repo: %q", r.CommitMessage)
 	Blank()
 	path := shellQuoteForCD(config.Contract(r.CentralRepo), r.CentralRepo)
