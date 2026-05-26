@@ -112,6 +112,20 @@ func Add(opts AddOptions) (AddResult, error) {
 			WithHint("remove the stale symlink and re-run, or run `lore doctor` once it ships")
 	}
 
+	// safety gate runs BEFORE DetectAgentDir. DetectAgentDir skips
+	// symlinked candidates by design (the post-add steady-state is a
+	// symlink into central) which would hide the slice-3 agent-dir-is-
+	// symlink case from any post-detect check. running it first means
+	// the user sees the right refusal even when DetectAgentDir would
+	// have returned "no agent dir found".
+	violations, err := detect.CheckSafety(projectPath, cfg.AgentDirs)
+	if err != nil {
+		return AddResult{}, err
+	}
+	if len(violations) > 0 {
+		return AddResult{}, buildSafetyError(violations)
+	}
+
 	agentDir, found, err := detect.DetectAgentDir(projectPath, cfg.AgentDirs)
 	if err != nil {
 		return AddResult{}, err
@@ -269,6 +283,23 @@ func resolveProjectPath(in string) (string, error) {
 			fmt.Sprintf("cannot resolve symlinks in %s", raw))
 	}
 	return resolved, nil
+}
+
+// buildSafetyError collapses one or more safety violations into a single
+// CodeRefusedSafety error. Each violation's full message becomes a bullet
+// under a short header so the user sees every gate that fired in one go
+// rather than fixing them one-at-a-time across multiple `lore add` retries.
+// No hint is attached: each violation message already contains its own
+// recovery instruction, and a synthetic top-level hint would either repeat
+// one of them or paper over the others.
+func buildSafetyError(vs []detect.Violation) error {
+	var b strings.Builder
+	b.WriteString("refused for safety:")
+	for _, v := range vs {
+		b.WriteString("\n  - ")
+		b.WriteString(v.Message)
+	}
+	return lerr.New(lerr.CodeRefusedSafety, b.String())
 }
 
 // renderAddTemplate expands the {project} variable in commit.add_template.
