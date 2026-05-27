@@ -164,10 +164,12 @@ func TestAddPickerWritesRepoGitignoreAndProceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, *calls, "picker should fire once when not ignored")
 
-	// .gitignore at repo root got the entry.
+	// .gitignore at repo root got the entry. exact-match so a regression
+	// reintroducing the trailing slash (which fails to match the post-move
+	// symlink) is caught here.
 	got, err := os.ReadFile(filepath.Join(projectRoot, ".gitignore"))
 	require.NoError(t, err)
-	require.Contains(t, string(got), ".claude/")
+	require.Equal(t, ".claude\n", string(got))
 
 	// the rest of Add ran: central + symlink + state + commit.
 	require.Equal(t,
@@ -193,7 +195,7 @@ func TestAddPickerWritesGlobalExcludesAndProceeds(t *testing.T) {
 	require.NotEmpty(t, xdg)
 	got, err := os.ReadFile(filepath.Join(xdg, "git", "ignore"))
 	require.NoError(t, err, "global excludes file should have been created")
-	require.Contains(t, string(got), ".claude/")
+	require.Equal(t, ".claude\n", string(got))
 }
 
 func TestAddPickerWritesRepoExcludeAndProceeds(t *testing.T) {
@@ -205,10 +207,12 @@ func TestAddPickerWritesRepoExcludeAndProceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, *calls)
 
-	// .git/info/exclude contains the entry now.
+	// .git/info/exclude contains the entry now. unignoreSandbox emptied
+	// the file at setup time, so the exact-match assertion catches a
+	// trailing-slash regression cleanly.
 	got, err := os.ReadFile(filepath.Join(projectRoot, ".git", "info", "exclude"))
 	require.NoError(t, err)
-	require.Contains(t, string(got), ".claude/")
+	require.Equal(t, ".claude\n", string(got))
 }
 
 func TestAddPickerDismissAbortsWithNoSideEffects(t *testing.T) {
@@ -321,7 +325,7 @@ func TestAddPickerWritesToRepoToplevelForMonorepoSubdir(t *testing.T) {
 	// entry must land in the repo's root .gitignore, not in the subdir.
 	gotRoot, err := os.ReadFile(filepath.Join(repoRoot, ".gitignore"))
 	require.NoError(t, err)
-	require.Contains(t, string(gotRoot), ".claude/")
+	require.Equal(t, ".claude\n", string(gotRoot))
 	_, subStatErr := os.Stat(filepath.Join(subProject, ".gitignore"))
 	require.True(t, os.IsNotExist(subStatErr),
 		"no stray .gitignore at the subdir level")
@@ -355,7 +359,6 @@ func TestAddPickerNotReinvokedAfterSuccessfulRun(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, *calls, "second run must not re-invoke the picker")
 }
-
 
 func TestAddNoAgentDirFound(t *testing.T) {
 	_, projectRoot := addSandbox(t)

@@ -173,10 +173,15 @@ func Add(opts AddOptions) (AddResult, error) {
 		if err != nil {
 			return AddResult{}, err
 		}
-		// trailing slash signals "directory" to git's matcher and
-		// matches what users would write by hand. agentDir.Name itself
-		// is bare (no slash) per detect.AgentDir's contract.
-		if err := git.AppendIgnoreEntry(targetPath, agentDir.Name+"/"); err != nil {
+		// no trailing slash: a `.aider/` pattern only matches when the
+		// path on disk is a real directory, so once lore moves the agent
+		// dir into central and replaces it with a symlink, the pattern
+		// stops matching and `git status` shows the symlink as untracked.
+		// Bare `.aider` matches file, directory, and symlink alike, so
+		// the entry stays correct across the pre-move directory and the
+		// post-move symlink. when the match resolves to a directory, git
+		// still ignores everything inside it.
+		if err := git.AppendIgnoreEntry(targetPath, agentDir.Name); err != nil {
 			return AddResult{}, err
 		}
 		// re-verify via check-ignore: source of truth for "is it ignored",
@@ -188,11 +193,11 @@ func Add(opts AddOptions) (AddResult, error) {
 		}
 		if !ignored {
 			return AddResult{}, lerr.Newf(lerr.CodeInconsistency,
-				"wrote %s/ to %s but git check-ignore still reports it as not ignored",
+				"wrote %s to %s but git check-ignore still reports it as not ignored",
 				agentDir.Name, config.Contract(targetPath)).
 				WithHint("check git's gitignore precedence (`git check-ignore -v` against the dir) and fix the conflict")
 		}
-		output.Success("added %s/ to %s", agentDir.Name, config.Contract(targetPath))
+		output.Success("added %s to %s", agentDir.Name, config.Contract(targetPath))
 	}
 
 	commitMessage := renderAddTemplate(cfg.Commit.AddTemplate, name)
@@ -369,7 +374,10 @@ func resolveGitignoreTarget(target prompt.GitignoreTarget, repoTop string) (stri
 	case prompt.TargetRepoExclude:
 		return git.RepoExcludePath(repoTop)
 	default:
-		return "", lerr.Newf(lerr.CodeGenericError,
+		// unreachable today: only fires if GitignoreTarget gains a variant
+		// without a matching case here. CodeInconsistency reflects the
+		// programmer-error nature better than CodeGenericError would.
+		return "", lerr.Newf(lerr.CodeInconsistency,
 			"unknown gitignore target %d", target)
 	}
 }
