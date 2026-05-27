@@ -1,6 +1,6 @@
 [ok] Project:   my-app (~/code/my-app)
 [ok] Agent dir: .claude
-[ok] Globally gitignored: yes
+[ok] Gitignored: yes
 
 -> Moved  .claude  ->  ~/agent-context/projects/my-app/.claude
 -> Linked .claude  <-  ~/agent-context/projects/my-app/.claude

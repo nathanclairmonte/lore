@@ -19,6 +19,8 @@ import (
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/git"
 	"github.com/nathanclairmonte/lore/internal/link"
+	"github.com/nathanclairmonte/lore/internal/output"
+	"github.com/nathanclairmonte/lore/internal/prompt"
 	"github.com/nathanclairmonte/lore/internal/state"
 )
 
@@ -139,16 +141,63 @@ func Add(opts AddOptions) (AddResult, error) {
 			config.Contract(projectPath), strings.Join(cfg.AgentDirs, ", "))
 	}
 
-	// gitignore precheck. slice 4 replaces this with the interactive
-	// picker; slice 2 refuses with a forward-pointing message.
+	// gitignore precheck. if not ignored, the picker writes the entry
+	// the user selects and we re-verify via check-ignore before
+	// proceeding. all writes here land BEFORE the success-gated unwind
+	// region: a failure leaves the gitignore line intact (which is
+	// correct either way) but no central / state / commit side effects.
 	ignored, err := git.CheckIgnore(projectPath, agentDir.Name)
 	if err != nil {
 		return AddResult{}, err
 	}
 	if !ignored {
-		return AddResult{}, lerr.Newf(lerr.CodeRefusedSafety,
-			"%s is not globally gitignored", agentDir.Name).
-			WithHint("add it to your global .gitignore and re-run; an interactive picker is coming in a future release")
+		// fail fast on non-git projects BEFORE the picker fires. CheckIgnore
+		// folds not-a-repo into "not ignored" (its contract), so without
+		// this gate a non-git project would land in the picker, write to
+		// disk, and only fail on re-verify - leaving stray .gitignore /
+		// global-excludes pollution behind. RepoToplevel returns the repo
+		// root path, which we also need for the TargetRepoGitignore case
+		// when the project is onboarded from a subdirectory of a monorepo.
+		repoTop, err := git.RepoToplevel(projectPath)
+		if err != nil {
+			return AddResult{}, err
+		}
+
+		target, err := pickGitignoreTarget(agentDir.Name)
+		if err != nil {
+			// already a *lerr.Error from the picker (CodeRefusedSafety
+			// on dismiss, CodeInconsistency on no-TTY / JSON mode).
+			return AddResult{}, err
+		}
+		targetPath, err := resolveGitignoreTarget(target, repoTop)
+		if err != nil {
+			return AddResult{}, err
+		}
+		// no trailing slash: a `.aider/` pattern only matches when the
+		// path on disk is a real directory, so once lore moves the agent
+		// dir into central and replaces it with a symlink, the pattern
+		// stops matching and `git status` shows the symlink as untracked.
+		// Bare `.aider` matches file, directory, and symlink alike, so
+		// the entry stays correct across the pre-move directory and the
+		// post-move symlink. when the match resolves to a directory, git
+		// still ignores everything inside it.
+		if err := git.AppendIgnoreEntry(targetPath, agentDir.Name); err != nil {
+			return AddResult{}, err
+		}
+		// re-verify via check-ignore: source of truth for "is it ignored",
+		// catches a wrong-target write (e.g. user has a stale
+		// core.excludesFile pointing somewhere git no longer reads).
+		ignored, err = git.CheckIgnore(projectPath, agentDir.Name)
+		if err != nil {
+			return AddResult{}, err
+		}
+		if !ignored {
+			return AddResult{}, lerr.Newf(lerr.CodeInconsistency,
+				"wrote %s to %s but git check-ignore still reports it as not ignored",
+				agentDir.Name, config.Contract(targetPath)).
+				WithHint("check git's gitignore precedence (`git check-ignore -v` against the dir) and fix the conflict")
+		}
+		output.Success("added %s to %s", agentDir.Name, config.Contract(targetPath))
 	}
 
 	commitMessage := renderAddTemplate(cfg.Commit.AddTemplate, name)
@@ -303,6 +352,34 @@ func buildSafetyError(vs []detect.Violation) error {
 		b.WriteString(v.Message)
 	}
 	return lerr.New(lerr.CodeRefusedSafety, b.String())
+}
+
+// pickGitignoreTarget is var (not const) so tests in this package can
+// stub the interactive picker with a fixed choice without driving huh
+// through a real terminal. Mirrors the prompt.isTTY test-seam pattern.
+var pickGitignoreTarget = prompt.PickGitignoreTarget
+
+// resolveGitignoreTarget maps a picker choice to the filesystem path the
+// entry should be appended to. repoTop (from git.RepoToplevel) anchors
+// the TargetRepoGitignore case to the actual repo root, not the project
+// path: when the user runs `lore add` from a subdirectory of a monorepo,
+// we still want the entry to land in the repo's root .gitignore rather
+// than scattering a new .gitignore under a subdir.
+func resolveGitignoreTarget(target prompt.GitignoreTarget, repoTop string) (string, error) {
+	switch target {
+	case prompt.TargetRepoGitignore:
+		return filepath.Join(repoTop, ".gitignore"), nil
+	case prompt.TargetGlobalExcludes:
+		return git.GlobalExcludesPath()
+	case prompt.TargetRepoExclude:
+		return git.RepoExcludePath(repoTop)
+	default:
+		// unreachable today: only fires if GitignoreTarget gains a variant
+		// without a matching case here. CodeInconsistency reflects the
+		// programmer-error nature better than CodeGenericError would.
+		return "", lerr.Newf(lerr.CodeInconsistency,
+			"unknown gitignore target %d", target)
+	}
 }
 
 // renderAddTemplate expands the {project} variable in commit.add_template.
