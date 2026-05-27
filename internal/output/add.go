@@ -43,7 +43,13 @@ func PrintAddResult(r AddResult) {
 
 	Success("Project:   %s (%s)", r.ProjectName, config.Contract(r.ProjectPath))
 	Success("Agent dir: %s", r.AgentDirName)
-	Success("Globally gitignored: yes")
+	// "Gitignored" without "globally": slice 4's picker lets the user
+	// place the entry in one of three locations (repo .gitignore, global
+	// excludes, .git/info/exclude). Only one of those is truly global,
+	// so the older "Globally gitignored: yes" wording was a lie in two
+	// of three picker outcomes. The picker-write line printed upstream
+	// already names the exact location when relevant.
+	Success("Gitignored: yes")
 	Blank()
 	g := activeGlyphs()
 	pathStyle := stylePath()
