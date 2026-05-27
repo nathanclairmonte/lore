@@ -1,28 +1,41 @@
 // Package state loads and saves lore's per-machine local state file
-// (~/.local/state/lore/state.toml). State is never committed; it's a path
-// mapping (project name -> on-disk path) regeneratable by `lore link`.
+// (~/.local/state/lore/state.toml). State is never committed; it's a
+// per-project record of on-disk path + tracked agent dirs, regeneratable
+// by `lore link`.
 package state
 
 import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/BurntSushi/toml"
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 )
 
 // CurrentSchemaVersion is the schema_version value written by this lore
-// build. Bump when the on-disk schema changes; Load is responsible for
-// future migration logic.
-const CurrentSchemaVersion = 1
+// build. Bumped to 2 in slice 5 to record the set of tracked agent dirs
+// per project. Older versions are rejected at Load time: lore is still
+// pre-1.0 with effectively one user, so the cost of carrying migration
+// code outweighs the convenience.
+const CurrentSchemaVersion = 2
 
 const stateFileRelPath = "lore/state.toml"
 
+// ProjectEntry is the per-project record. AgentDirs is the set of agent
+// directories tracked under projects/<name>/ in the central repo, in the
+// order they were added. Always non-empty for a tracked project:
+// RemoveAgentDir collapses the entry when the last dir leaves.
+type ProjectEntry struct {
+	Path      string   `toml:"path"`
+	AgentDirs []string `toml:"agent_dirs"`
+}
+
 // State is the typed representation of state.toml.
 type State struct {
-	SchemaVersion int               `toml:"schema_version"`
-	Paths         map[string]string `toml:"paths"` // project name -> absolute path
+	SchemaVersion int                     `toml:"schema_version"`
+	Projects      map[string]ProjectEntry `toml:"projects"`
 }
 
 // Path returns the on-disk location of the state file. Honors
@@ -42,12 +55,14 @@ func Path() (string, error) {
 func Defaults() State {
 	return State{
 		SchemaVersion: CurrentSchemaVersion,
-		Paths:         map[string]string{},
+		Projects:      map[string]ProjectEntry{},
 	}
 }
 
 // Load reads the state file. If absent, returns Defaults() with
-// exists=false (nil err).
+// exists=false (nil err). Files at schema versions other than the
+// current one are rejected with CodeInconsistency; the user is expected
+// to remove the stale file (a future `lore link` will regenerate it).
 func Load() (st State, exists bool, err error) {
 	path, err := Path()
 	if err != nil {
@@ -60,69 +75,135 @@ func Load() (st State, exists bool, err error) {
 		}
 		return State{}, false, lerr.Wrap(lerr.CodeGenericError, err, "cannot read state file")
 	}
-	st = Defaults()
+	// decode into a zero-value State (NOT Defaults()) so a file missing
+	// schema_version doesn't silently inherit CurrentSchemaVersion and
+	// slip past the version check below.
 	if _, err := toml.Decode(string(data), &st); err != nil {
 		return State{}, false, lerr.Wrap(lerr.CodeGenericError, err, "malformed state file at "+path)
 	}
-	if st.Paths == nil {
-		st.Paths = map[string]string{}
+	if st.SchemaVersion != CurrentSchemaVersion {
+		return State{}, false, lerr.Newf(lerr.CodeInconsistency,
+			"state file at %s is schema version %d, but this lore expects %d",
+			path, st.SchemaVersion, CurrentSchemaVersion).
+			WithHint("delete the file and re-run `lore add` (or `lore link` once it ships)")
+	}
+	// enforce the ProjectEntry invariant at the trust boundary: every
+	// tracked project has at least one agent dir. AddAgentDir and
+	// RemoveAgentDir maintain this in memory, but a hand-edited state
+	// file could skip the agent_dirs key entirely and slip through
+	// otherwise, leaving Add to fail with a confusing central-side
+	// CodeConflict instead of a clear "your state file is wrong."
+	for name, entry := range st.Projects {
+		if len(entry.AgentDirs) == 0 {
+			return State{}, false, lerr.Newf(lerr.CodeInconsistency,
+				"state file at %s has no agent_dirs for project %q",
+				path, name).
+				WithHint("delete the file and re-run `lore add` (or `lore link` once it ships)")
+		}
+	}
+	if st.Projects == nil {
+		st.Projects = map[string]ProjectEntry{}
 	}
 	return st, true, nil
 }
 
-// AddPath records project name -> absolute path on the in-memory state.
-// Idempotent on same (name, path); rejects same name with a different
-// path so callers don't silently clobber tracked locations.
+// ProjectEntryFor returns the entry recorded for name. Second return is
+// false when the project isn't tracked.
+func (s *State) ProjectEntryFor(name string) (ProjectEntry, bool) {
+	if s.Projects == nil {
+		return ProjectEntry{}, false
+	}
+	e, ok := s.Projects[name]
+	return e, ok
+}
+
+// PathFor returns the absolute path recorded for name. Thin wrapper for
+// callers that only care about the project path, not its agent dirs.
+func (s *State) PathFor(name string) (string, bool) {
+	e, ok := s.ProjectEntryFor(name)
+	if !ok {
+		return "", false
+	}
+	return e.Path, true
+}
+
+// AddAgentDir records (name, projectPath, dirName) on the in-memory
+// state. Idempotent on a triple already present; rejects the same name
+// at a different projectPath (callers must remove the old entry first).
 //
-// Rejects empty names, empty paths, and non-absolute paths so a
-// misbehaving caller can't poison state with values that would later
-// fail to round-trip or resolve.
+// Rejects empty names, empty paths, non-absolute paths, and empty
+// dirNames so a misbehaving caller can't poison state with values that
+// would later fail to round-trip or resolve.
 //
 // Does NOT persist; callers control when to Save so multi-step flows
 // (lore add) can roll back without leaving a half-written state file.
-func (s *State) AddPath(name, path string) error {
+func (s *State) AddAgentDir(name, projectPath, dirName string) error {
 	if name == "" {
 		return lerr.New(lerr.CodeGenericError, "project name cannot be empty")
 	}
-	if path == "" {
+	if projectPath == "" {
 		return lerr.New(lerr.CodeGenericError, "project path cannot be empty")
 	}
-	if !filepath.IsAbs(path) {
+	if !filepath.IsAbs(projectPath) {
 		return lerr.Newf(lerr.CodeGenericError,
-			"project path must be absolute, got %q", path)
+			"project path must be absolute, got %q", projectPath)
 	}
-	if s.Paths == nil {
-		s.Paths = map[string]string{}
+	if dirName == "" {
+		return lerr.New(lerr.CodeGenericError, "agent dir name cannot be empty")
 	}
-	if existing, ok := s.Paths[name]; ok {
-		if existing == path {
-			return nil
+	if s.Projects == nil {
+		s.Projects = map[string]ProjectEntry{}
+	}
+	existing, ok := s.Projects[name]
+	if !ok {
+		s.Projects[name] = ProjectEntry{
+			Path:      projectPath,
+			AgentDirs: []string{dirName},
 		}
-		return lerr.Newf(lerr.CodeConflict,
-			"project %q is already tracked at %s", name, existing)
+		return nil
 	}
-	s.Paths[name] = path
+	if existing.Path != projectPath {
+		return lerr.Newf(lerr.CodeConflict,
+			"project %q is already tracked at %s", name, existing.Path)
+	}
+	if slices.Contains(existing.AgentDirs, dirName) {
+		return nil
+	}
+	existing.AgentDirs = append(existing.AgentDirs, dirName)
+	s.Projects[name] = existing
 	return nil
 }
 
-// PathFor returns the absolute path recorded for name. Second return is
-// false when the project isn't tracked.
-func (s *State) PathFor(name string) (string, bool) {
-	if s.Paths == nil {
-		return "", false
-	}
-	p, ok := s.Paths[name]
-	return p, ok
-}
-
-// RemovePath drops the mapping for name. No-op when not tracked.
+// RemoveAgentDir drops dirName from name's tracked set. If the removal
+// empties the project's agent dir list, the project entry itself is
+// removed (a project with zero tracked dirs is not a tracked project).
+// No-op when the project or the dir isn't tracked.
 //
-// Does NOT persist; see AddPath for the rationale.
-func (s *State) RemovePath(name string) {
-	if s.Paths == nil {
+// Does NOT persist; see AddAgentDir for the rationale.
+func (s *State) RemoveAgentDir(name, dirName string) {
+	if s.Projects == nil {
 		return
 	}
-	delete(s.Paths, name)
+	entry, ok := s.Projects[name]
+	if !ok {
+		return
+	}
+	// fresh slice rather than entry.AgentDirs[:0]: in-place filtering
+	// would alias the existing backing array, so any caller still
+	// holding the old slice (or a ProjectEntry value copied earlier in
+	// the same call) would see corrupted data.
+	filtered := make([]string, 0, len(entry.AgentDirs))
+	for _, d := range entry.AgentDirs {
+		if d != dirName {
+			filtered = append(filtered, d)
+		}
+	}
+	if len(filtered) == 0 {
+		delete(s.Projects, name)
+		return
+	}
+	entry.AgentDirs = filtered
+	s.Projects[name] = entry
 }
 
 // Save writes the state file atomically, creating its parent directory

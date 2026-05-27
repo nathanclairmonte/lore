@@ -31,50 +31,60 @@ type Violation struct {
 	Message string
 }
 
-// CheckSafety runs the three slice-3 refusals against the single candidate
-// at root that lore would actually manage: the first entry in candidates
-// (priority order) that exists as either a directory or a symlink. Missing
-// candidates and regular files are skipped, matching DetectAgentDir's
-// precedence rules so the policy and detection layers agree on which
-// candidate is in play.
+// CheckSafetyAll runs the slice-3 refusals against every name in names
+// independently. Returns a map keyed by name; entries are present only
+// when violations fired (an absent key means that candidate is clean OR
+// doesn't exist as a directory/symlink at root).
 //
-// Returning violations only for the "intended" candidate avoids the false-
-// positive shape where a clean .claude (which would be adopted) is refused
-// because an unrelated .cursor (which lore would never touch) happens to
-// have a nested .git. Lore polices what it manages, not what it ignores.
+// Each candidate is policed in isolation so multi-dir onboarding can
+// skip just the offending dir and proceed with the rest, matching the
+// slice-5 acceptance criterion. The slice-3 "polices what it manages"
+// principle survives in the orchestrator's selection logic: only names
+// the orchestrator intends to onboard are passed in.
 //
 // A symlinked candidate produces exactly one violation (AgentDirSymlink)
 // and the dir-only checks are skipped: those checks read through the
-// symlink and would re-report against the resolved target rather than the
-// candidate name the user controls. A directory candidate can produce up
-// to two violations (tracked + nested .git) so the user fixes both in one
-// round-trip.
+// symlink and would report against the resolved target rather than the
+// candidate name the user controls. A directory candidate can produce
+// up to two violations (tracked + nested .git) so the user fixes both
+// in one round-trip.
 //
-// Pure inspection: no mutation, no network. Safe to call before any side
-// effects in project.Add. Only `git ls-files` is consulted, and only when
-// a directory candidate has been selected.
-//
-// Run as a pre-check before DetectAgentDir rather than after: DetectAgentDir
-// intentionally skips symlinked candidates (the post-add steady-state is a
-// symlink into central, so re-detecting them would re-onboard tracked
-// projects). That skip would hide the slice-3 symlink violation from any
-// post-detect check, leaving the user with a confusing "no agent directory
-// found" when they have a pre-existing symlinked .claude.
-func CheckSafety(root string, candidates []string) ([]Violation, error) {
-	name, path, isSymlink, ok, err := firstManagedCandidate(root, candidates)
-	if err != nil {
-		return nil, err
+// Pure inspection: no mutation, no network. Only `git ls-files` is
+// consulted, and only for directory candidates.
+func CheckSafetyAll(root string, names []string) (map[string][]Violation, error) {
+	out := map[string][]Violation{}
+	for _, name := range names {
+		vs, err := checkOne(root, name)
+		if err != nil {
+			return nil, err
+		}
+		if len(vs) > 0 {
+			out[name] = vs
+		}
 	}
-	if !ok {
-		return nil, nil
+	return out, nil
+}
+
+// checkOne returns the violations for a single candidate name at root.
+// Missing entries and regular files yield no violations (and no error):
+// the orchestrator wouldn't onboard them anyway, and `--dir` validation
+// upstream rejects user-supplied names that don't exist at all.
+func checkOne(root, name string) ([]Violation, error) {
+	path := filepath.Join(root, name)
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, lerr.Wrap(lerr.CodeGenericError, err,
+			fmt.Sprintf("cannot stat %s", path))
 	}
 
-	if isSymlink {
+	if info.Mode()&os.ModeSymlink != 0 {
 		target, readErr := os.Readlink(path)
 		if readErr != nil {
 			// Lstat succeeded but Readlink didn't - surface the message
 			// without the target rather than failing the whole check.
-			// the user still gets the actionable refusal.
 			target = "(unreadable)"
 		}
 		return []Violation{{
@@ -88,14 +98,18 @@ func CheckSafety(root string, candidates []string) ([]Violation, error) {
 		}}, nil
 	}
 
+	if !info.IsDir() {
+		// regular file at this candidate name: nothing to police.
+		return nil, nil
+	}
+
 	var violations []Violation
 
 	// nested .git check. Stat (not Lstat) so a .git that's itself a
 	// symlink into a real git repo still counts. A non-NotExist stat
 	// error (permission denied, etc.) is deliberately swallowed here:
 	// it shouldn't poison the whole check -- the tracked-file probe
-	// below still runs, mirroring the Readlink fallback above, so the
-	// user gets every signal we CAN produce.
+	// below still runs so the user gets every signal we CAN produce.
 	if _, statErr := os.Stat(filepath.Join(path, ".git")); statErr == nil {
 		violations = append(violations, Violation{
 			Kind: ViolationNestedGit,
@@ -132,33 +146,4 @@ func CheckSafety(root string, candidates []string) ([]Violation, error) {
 	}
 
 	return violations, nil
-}
-
-// firstManagedCandidate walks candidates in priority order and returns the
-// first one that exists as a directory or a symlink (the candidate
-// DetectAgentDir would consider, plus symlinks for safety reporting).
-// Regular files and missing entries are skipped. ok=false means no
-// candidate is relevant: safety has nothing to check, and DetectAgentDir
-// will surface "no agent dir found" downstream.
-func firstManagedCandidate(root string, candidates []string) (name, path string, isSymlink, ok bool, err error) {
-	for _, n := range candidates {
-		p := filepath.Join(root, n)
-		info, statErr := os.Lstat(p)
-		if statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				continue
-			}
-			return "", "", false, false, lerr.Wrap(lerr.CodeGenericError, statErr,
-				fmt.Sprintf("cannot stat %s", p))
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return n, p, true, true, nil
-		}
-		if info.IsDir() {
-			return n, p, false, true, nil
-		}
-		// regular file at this name: DetectAgentDir would skip it and
-		// move on, so we do the same.
-	}
-	return "", "", false, false, nil
 }

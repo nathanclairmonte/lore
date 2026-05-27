@@ -11,7 +11,7 @@ import (
 )
 
 // initCentralWithIdentity prepares a sandbox central repo with a git
-// identity wired so `git commit` (no inline -c) succeeds. AddProject
+// identity wired so `Commit` (no inline -c) succeeds. AddAgentDir's
 // commits use the user's identity per ADR 0003.
 func initCentralWithIdentity(t *testing.T) *Central {
 	t.Helper()
@@ -31,25 +31,24 @@ func initCentralWithIdentity(t *testing.T) *Central {
 	return c
 }
 
-// makeProject creates a project root with a populated .claude dir and
-// returns the agent-dir's source path on disk.
-func makeProject(t *testing.T) string {
+// makeProjectDir creates an agent dir of the given name under a fresh
+// project root and returns the source path.
+func makeProjectDir(t *testing.T, name string) string {
 	t.Helper()
 	root := t.TempDir()
-	agent := filepath.Join(root, ".claude")
+	agent := filepath.Join(root, name)
 	require.NoError(t, os.Mkdir(agent, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(agent, "CLAUDE.md"),
 		[]byte("context"), 0o644))
 	return agent
 }
 
-func TestAddProjectMovesStagesAndCommits(t *testing.T) {
+func TestAddAgentDirMovesAndStages(t *testing.T) {
 	c := initCentralWithIdentity(t)
-	src := makeProject(t)
+	src := makeProjectDir(t, ".claude")
 
-	dest, commit, undo, err := c.AddProject("my-app", ".claude", src)
+	dest, undo, err := c.AddAgentDir("my-app", ".claude", src)
 	require.NoError(t, err)
-	require.NotNil(t, commit)
 	require.NotNil(t, undo)
 
 	// source side: moved away
@@ -64,10 +63,17 @@ func TestAddProjectMovesStagesAndCommits(t *testing.T) {
 	rev, err := git.Run(c.Path, "rev-list", "--count", "HEAD")
 	require.NoError(t, err)
 	require.Equal(t, "1", rev)
+}
 
-	// commit closure advances HEAD with the supplied message.
-	require.NoError(t, commit("feat: add my-app"))
-	rev, err = git.Run(c.Path, "rev-list", "--count", "HEAD")
+func TestCommitAdvancesHeadWithUserIdentity(t *testing.T) {
+	c := initCentralWithIdentity(t)
+	src := makeProjectDir(t, ".claude")
+
+	_, _, err := c.AddAgentDir("my-app", ".claude", src)
+	require.NoError(t, err)
+
+	require.NoError(t, c.Commit("feat: add my-app"))
+	rev, err := git.Run(c.Path, "rev-list", "--count", "HEAD")
 	require.NoError(t, err)
 	require.Equal(t, "2", rev)
 
@@ -81,14 +87,14 @@ func TestAddProjectMovesStagesAndCommits(t *testing.T) {
 	require.Equal(t, "test@example.com", author)
 }
 
-func TestAddProjectUndoReversesRename(t *testing.T) {
+func TestAddAgentDirUndoReversesRename(t *testing.T) {
 	c := initCentralWithIdentity(t)
-	src := makeProject(t)
+	src := makeProjectDir(t, ".claude")
 
 	headBefore, err := git.Run(c.Path, "rev-parse", "HEAD")
 	require.NoError(t, err)
 
-	_, _, undo, err := c.AddProject("my-app", ".claude", src)
+	_, undo, err := c.AddAgentDir("my-app", ".claude", src)
 	require.NoError(t, err)
 
 	require.NoError(t, undo())
@@ -110,20 +116,77 @@ func TestAddProjectUndoReversesRename(t *testing.T) {
 	require.Empty(t, staged)
 }
 
-func TestAddProjectRefusesWhenProjectDirExists(t *testing.T) {
+func TestAddAgentDirSecondDirReusesProjectDir(t *testing.T) {
+	// slice 5 multi-dir core invariant: extending a tracked project with
+	// a new agent dir must succeed (the project dir already exists from
+	// the first add).
 	c := initCentralWithIdentity(t)
-	src := makeProject(t)
 
-	// pre-create projects/my-app/ to simulate a stale state from an
-	// earlier add that wasn't cleaned up.
-	require.NoError(t, os.MkdirAll(filepath.Join(c.Path, "projects", "my-app"), 0o755))
+	src1 := makeProjectDir(t, ".claude")
+	_, _, err := c.AddAgentDir("my-app", ".claude", src1)
+	require.NoError(t, err)
+	require.NoError(t, c.Commit("feat: add my-app .claude"))
 
-	_, _, _, err := c.AddProject("my-app", ".claude", src)
+	src2 := makeProjectDir(t, ".cursor")
+	dest2, undo2, err := c.AddAgentDir("my-app", ".cursor", src2)
+	require.NoError(t, err)
+	require.NotNil(t, undo2)
+	require.FileExists(t, filepath.Join(dest2, "CLAUDE.md"))
+
+	// both dirs are now siblings under projects/my-app/.
+	require.DirExists(t, filepath.Join(c.Path, "projects", "my-app", ".claude"))
+	require.DirExists(t, filepath.Join(c.Path, "projects", "my-app", ".cursor"))
+}
+
+func TestAddAgentDirUndoOfSecondDirPreservesFirst(t *testing.T) {
+	// rolling back the second add must NOT remove the project dir or
+	// the previously-tracked .claude inside it.
+	c := initCentralWithIdentity(t)
+
+	src1 := makeProjectDir(t, ".claude")
+	_, _, err := c.AddAgentDir("my-app", ".claude", src1)
+	require.NoError(t, err)
+	require.NoError(t, c.Commit("feat: add my-app .claude"))
+
+	src2 := makeProjectDir(t, ".cursor")
+	_, undo2, err := c.AddAgentDir("my-app", ".cursor", src2)
+	require.NoError(t, err)
+	require.NoError(t, undo2())
+
+	// .claude survives; .cursor is gone from central; src2 is restored.
+	require.DirExists(t, filepath.Join(c.Path, "projects", "my-app", ".claude"))
+	require.NoDirExists(t, filepath.Join(c.Path, "projects", "my-app", ".cursor"))
+	require.FileExists(t, filepath.Join(src2, "CLAUDE.md"))
+}
+
+func TestAddAgentDirRefusesWhenAgentDirAlreadyTracked(t *testing.T) {
+	c := initCentralWithIdentity(t)
+	src := makeProjectDir(t, ".claude")
+
+	// pre-create projects/my-app/.claude/ to simulate the slice-5
+	// "this specific agent dir is already tracked" case.
+	require.NoError(t, os.MkdirAll(filepath.Join(c.Path, "projects", "my-app", ".claude"), 0o755))
+
+	_, _, err := c.AddAgentDir("my-app", ".claude", src)
 	require.Error(t, err)
 	require.Equal(t, lerr.CodeConflict, lerr.CodeOf(err))
 
 	// source must not have moved.
 	require.FileExists(t, filepath.Join(src, "CLAUDE.md"))
+}
+
+func TestAddAgentDirAllowsExtendingExistingProjectDir(t *testing.T) {
+	// slice-5 sibling of the refusal case above: a pre-existing
+	// projects/<name>/ but NO collision on dirName must NOT refuse.
+	c := initCentralWithIdentity(t)
+	src := makeProjectDir(t, ".cursor")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(c.Path, "projects", "my-app"), 0o755))
+
+	dest, undo, err := c.AddAgentDir("my-app", ".cursor", src)
+	require.NoError(t, err)
+	require.NotNil(t, undo)
+	require.FileExists(t, filepath.Join(dest, "CLAUDE.md"))
 }
 
 func TestProjectPathIsPure(t *testing.T) {
@@ -132,36 +195,49 @@ func TestProjectPathIsPure(t *testing.T) {
 	require.Equal(t, "/some/central/projects/my-app/.claude", got)
 }
 
-func TestSingleAgentDirName(t *testing.T) {
+func TestProjectAgentDirsSingle(t *testing.T) {
 	c := initCentralWithIdentity(t)
-	src := makeProject(t)
+	src := makeProjectDir(t, ".claude")
 
-	_, commit, _, err := c.AddProject("my-app", ".claude", src)
+	_, _, err := c.AddAgentDir("my-app", ".claude", src)
 	require.NoError(t, err)
-	require.NoError(t, commit("feat: add my-app"))
+	require.NoError(t, c.Commit("feat: add my-app"))
 
-	got, err := c.SingleAgentDirName("my-app")
+	got, err := c.ProjectAgentDirs("my-app")
 	require.NoError(t, err)
-	require.Equal(t, ".claude", got)
+	require.Equal(t, []string{".claude"}, got)
 }
 
-func TestSingleAgentDirNameMissingProject(t *testing.T) {
+func TestProjectAgentDirsMultipleSorted(t *testing.T) {
 	c := initCentralWithIdentity(t)
-	_, err := c.SingleAgentDirName("never-tracked")
+
+	// hand-build two agent dirs under projects/foo/ to mirror what
+	// successive AddAgentDir calls would produce. Sorted-string order
+	// is the contract.
+	pdir := filepath.Join(c.Path, "projects", "foo")
+	require.NoError(t, os.MkdirAll(filepath.Join(pdir, ".cursor"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(pdir, ".claude"), 0o755))
+
+	got, err := c.ProjectAgentDirs("foo")
+	require.NoError(t, err)
+	require.Equal(t, []string{".claude", ".cursor"}, got,
+		"results must be sorted so callers get a deterministic order")
+}
+
+func TestProjectAgentDirsMissingProject(t *testing.T) {
+	c := initCentralWithIdentity(t)
+	_, err := c.ProjectAgentDirs("never-tracked")
 	require.Error(t, err)
 	require.Equal(t, lerr.CodeNotFound, lerr.CodeOf(err))
 }
 
-func TestSingleAgentDirNameMultipleErrors(t *testing.T) {
+func TestProjectAgentDirsEmptyProject(t *testing.T) {
 	c := initCentralWithIdentity(t)
-	// hand-build two agent dirs under projects/foo/ to simulate the
-	// multi-dir world slice 5 enables; slice 2 surfaces this as an
-	// inconsistency rather than guessing.
-	pdir := filepath.Join(c.Path, "projects", "foo")
-	require.NoError(t, os.MkdirAll(filepath.Join(pdir, ".claude"), 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(pdir, ".cursor"), 0o755))
+	// project dir exists but has no agent-dir subdirs (a half-state that
+	// shouldn't normally exist, but be defensive).
+	require.NoError(t, os.MkdirAll(filepath.Join(c.Path, "projects", "ghost"), 0o755))
 
-	_, err := c.SingleAgentDirName("foo")
+	_, err := c.ProjectAgentDirs("ghost")
 	require.Error(t, err)
-	require.Equal(t, lerr.CodeInconsistency, lerr.CodeOf(err))
+	require.Equal(t, lerr.CodeNotFound, lerr.CodeOf(err))
 }

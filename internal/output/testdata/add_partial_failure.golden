@@ -1,0 +1,11 @@
+✓ Project:   my-app (~/code/my-app)
+
+→ Moved  .cursor  →  ~/agent-context/projects/my-app/.cursor
+→ Linked .cursor  ←  ~/agent-context/projects/my-app/.cursor
+
+⚠ Skipped (safety):
+  - .claude/ contains files tracked by this repo's git.
+
+✓ Committed to central repo: "feat: add my-app"
+
+Next: cd ~/agent-context && git push

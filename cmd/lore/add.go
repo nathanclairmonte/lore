@@ -6,44 +6,68 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newAddCmd builds the `lore add` cobra subcommand. Slice 2 ships only
-// the no-flag and `<path>` forms; --dir, --name, --create, --no-commit
-// arrive in slices 5/6.
+// newAddCmd builds the `lore add` cobra subcommand.
 func newAddCmd() *cobra.Command {
-	return &cobra.Command{
+	var dirs []string
+	cmd := &cobra.Command{
 		Use:   "add [path]",
-		Short: "Move a project's agent directory into the central repo and link it back",
-		Long: `Onboards a project: detects its agent directory, moves it
+		Short: "Move a project's agent directories into the central repo and link them back",
+		Long: `Onboards a project: detects its agent directories, moves each
 into the central repo at projects/<name>/<dir>/, plants an
 absolute symlink back at the original location, records the
-path locally, and commits using commit.add_template.`,
+paths locally, and commits using commit.add_template.
+
+When the project root contains multiple agent dirs (e.g. both
+.claude/ and .cursor/), all are tracked by default. Use --dir
+to scope a run to a subset, or to extend an already-tracked
+project with a new agent dir.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var opts project.AddOptions
+			opts := project.AddOptions{Dirs: dirs}
 			if len(args) == 1 {
 				opts.ProjectPath = args[0]
 			}
-			res, err := project.Add(opts)
-			if err != nil {
-				return err
+			res, addErr := project.Add(opts)
+			// render whatever the orchestrator produced before propagating
+			// any error: a partial-failure run (one dir added, one
+			// skipped) returns CodeRefusedSafety but its result still
+			// describes what landed.
+			if len(res.Dirs) > 0 {
+				output.PrintAddResult(addResultForOutput(res))
 			}
-			output.PrintAddResult(addResultForOutput(res))
-			return nil
+			return addErr
 		},
 	}
+	cmd.Flags().StringSliceVar(&dirs, "dir", nil,
+		"agent dir name to add (repeatable; default: all detected)")
+	return cmd
 }
 
 // addResultForOutput translates the orchestrator's AddResult into the
 // output layer's AddResult. The two structs are intentionally separate so
 // the output package depends only on config, not project.
 func addResultForOutput(r project.AddResult) output.AddResult {
+	dirs := make([]output.AddDirResult, 0, len(r.Dirs))
+	for _, d := range r.Dirs {
+		vs := make([]output.AddSafetyViolation, 0, len(d.Violations))
+		for _, v := range d.Violations {
+			vs = append(vs, output.AddSafetyViolation{
+				Kind:    string(v.Kind),
+				Message: v.Message,
+			})
+		}
+		dirs = append(dirs, output.AddDirResult{
+			Name:             d.Name,
+			Status:           output.AddDirStatus(d.Status),
+			CentralPath:      d.CentralPath,
+			SafetyViolations: vs,
+		})
+	}
 	return output.AddResult{
-		ProjectName:    r.ProjectName,
-		ProjectPath:    r.ProjectPath,
-		AgentDirName:   r.AgentDirName,
-		CentralPath:    r.CentralPath,
-		CentralRepo:    r.CentralRepo,
-		CommitMessage:  r.CommitMessage,
-		AlreadyTracked: r.AlreadyTracked,
+		ProjectName:   r.ProjectName,
+		ProjectPath:   r.ProjectPath,
+		CentralRepo:   r.CentralRepo,
+		CommitMessage: r.CommitMessage,
+		Dirs:          dirs,
 	}
 }
