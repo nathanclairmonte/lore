@@ -107,7 +107,9 @@ func AppendIgnoreEntry(path, entry string) error {
 	// done before Open(O_APPEND) so we don't have to seek backwards on
 	// the writable handle.
 	needsLeadingNewline := false
-	if info, statErr := os.Stat(path); statErr == nil && info.Size() > 0 {
+	info, statErr := os.Stat(path)
+	switch {
+	case statErr == nil && info.Size() > 0:
 		f, openErr := os.Open(path)
 		if openErr != nil {
 			return lerr.Wrap(lerr.CodeGenericError, openErr,
@@ -121,6 +123,13 @@ func AppendIgnoreEntry(path, entry string) error {
 				fmt.Sprintf("cannot read tail of %s", path))
 		}
 		needsLeadingNewline = last[0] != '\n'
+	case statErr != nil && !os.IsNotExist(statErr):
+		// non-NotExist Stat error (EACCES, etc.) is surfaced here rather
+		// than left to fall through to OpenFile below: a successful create
+		// after a failed Stat would silently skip the leading-newline
+		// fixup, producing a malformed gitignore line.
+		return lerr.Wrap(lerr.CodeGenericError, statErr,
+			fmt.Sprintf("cannot stat %s", path))
 	}
 
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
@@ -154,6 +163,12 @@ func AppendIgnoreEntry(path, entry string) error {
 // label can't be silently subverted by a per-repo override. Returns
 // (value, true, nil) when set, ("", false, nil) when unset (git's
 // exit 1), or (_, _, err) on real failure (missing binary, etc.).
+//
+// Intentionally bypasses Run: `git config --get` exits 1 when the key
+// isn't set, which is a normal answer here, but Run would class that as
+// CodeGitNetwork. Keeping the missing-binary detection duplicated is
+// the smaller cost than threading an allowed-exit-codes parameter
+// through Run for a single caller.
 func gitConfigGetGlobal(key string) (string, bool, error) {
 	cmd := exec.Command("git", "config", "--global", "--get", key)
 	var stdout, stderr bytes.Buffer
