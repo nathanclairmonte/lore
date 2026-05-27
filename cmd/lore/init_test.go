@@ -20,6 +20,11 @@ func sandbox(t *testing.T) (home string) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local/state"))
+	// hermetic git config: pin "global" to the temp HOME's .gitconfig
+	// and disable system scope so a Homebrew /usr/local/etc/gitconfig
+	// or a CI image's /etc/gitconfig can't leak into the test.
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
 	return home
 }
 
