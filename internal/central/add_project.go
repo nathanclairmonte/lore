@@ -59,8 +59,15 @@ func (c *Central) AddProject(name, dirName, sourcePath string) (
 			fmt.Sprintf("cannot move %s into central repo", sourcePath))
 	}
 
+	// -f forces past any gitignore rule that would otherwise exclude
+	// this path. the central repo's job is to track these agent dirs
+	// explicitly, regardless of what the user's global excludes file
+	// (slice 4's "global gitignore" picker option) or any inherited rule
+	// might say. without -f, picking global excludes would block the
+	// add: the same rule that ignores .claude/ in the user's projects
+	// also fires inside the central repo.
 	relStaged := filepath.Join("projects", name, dirName)
-	if _, addErr := git.Run(c.Path, "add", relStaged); addErr != nil {
+	if _, addErr := git.Run(c.Path, "add", "-f", relStaged); addErr != nil {
 		// undo the rename so callers see a clean slate; bare RemoveAll
 		// of the project dir would destroy user content if rename had
 		// landed under projects/<name>/.

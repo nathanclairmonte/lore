@@ -61,13 +61,19 @@ func TestLoreAdd_HappyPath(t *testing.T) {
 	require.Equal(t, "feat: add my-app", msg)
 }
 
-func TestLoreAdd_RefusesNotGitignored(t *testing.T) {
+func TestLoreAdd_RefusesNotGitignoredAndNoTTY(t *testing.T) {
 	_, projectRoot := addCmdSandbox(t)
 	// blank out the exclude rule so check-ignore says "not ignored".
 	require.NoError(t, os.WriteFile(
 		filepath.Join(projectRoot, ".git", "info", "exclude"),
 		[]byte(""), 0o644))
 
-	require.Equal(t, 5, run([]string{"add", projectRoot}),
-		"non-gitignored agent dir must exit 5 (refused for safety)")
+	// `go test` runs without a TTY, so the slice 4 picker's stdin gate
+	// fires and Add bails with CodeInconsistency (7). The picker itself
+	// would map an interactive dismissal to CodeRefusedSafety (5);
+	// non-interactive callers see CodeInconsistency. Both paths refuse
+	// to onboard so the underlying contract (lore add will not move a
+	// non-gitignored agent dir) is preserved.
+	require.Equal(t, 7, run([]string{"add", projectRoot}),
+		"no-TTY non-gitignored add must exit 7 (inconsistency)")
 }
