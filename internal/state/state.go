@@ -16,38 +16,25 @@ import (
 
 // CurrentSchemaVersion is the schema_version value written by this lore
 // build. Bumped to 2 in slice 5 to record the set of tracked agent dirs
-// per project (the slice 1-4 schema only carried project name -> path).
-// Load auto-migrates older versions; Save always writes the current one.
+// per project. Older versions are rejected at Load time: lore is still
+// pre-1.0 with effectively one user, so the cost of carrying migration
+// code outweighs the convenience.
 const CurrentSchemaVersion = 2
 
 const stateFileRelPath = "lore/state.toml"
 
 // ProjectEntry is the per-project record. AgentDirs is the set of agent
 // directories tracked under projects/<name>/ in the central repo, in the
-// order they were added.
-//
-// AgentDirs == nil is the documented v1->v2 migration sentinel: state
-// loaded from a v1 file has no per-dir info and stays nil until a
-// project-level command backfills it from central. AgentDirs == [] means
-// the user explicitly cleared every dir (shouldn't happen in practice
-// since RemoveAgentDir collapses the entry when the last dir leaves).
+// order they were added. Always non-empty for a tracked project:
+// RemoveAgentDir collapses the entry when the last dir leaves.
 type ProjectEntry struct {
 	Path      string   `toml:"path"`
-	AgentDirs []string `toml:"agent_dirs,omitempty"`
+	AgentDirs []string `toml:"agent_dirs"`
 }
 
 // State is the typed representation of state.toml.
 type State struct {
 	SchemaVersion int                     `toml:"schema_version"`
-	Projects      map[string]ProjectEntry `toml:"projects"`
-}
-
-// rawState is the on-disk shape used only for decode. Carrying both the
-// v1 (`paths`) and v2 (`projects`) keys lets Load read either without two
-// passes; the in-memory State only ever exposes the v2 shape.
-type rawState struct {
-	SchemaVersion int                     `toml:"schema_version"`
-	Paths         map[string]string       `toml:"paths"`
 	Projects      map[string]ProjectEntry `toml:"projects"`
 }
 
@@ -73,10 +60,9 @@ func Defaults() State {
 }
 
 // Load reads the state file. If absent, returns Defaults() with
-// exists=false (nil err). v1 state files (with a `paths` table and no
-// `projects`) are migrated in-memory: each path becomes a ProjectEntry
-// with AgentDirs=nil so the orchestrator knows to backfill from central
-// on first use. The new shape isn't persisted until the next Save.
+// exists=false (nil err). Files at schema versions other than the
+// current one are rejected with CodeInconsistency; the user is expected
+// to remove the stale file (a future `lore link` will regenerate it).
 func Load() (st State, exists bool, err error) {
 	path, err := Path()
 	if err != nil {
@@ -89,19 +75,34 @@ func Load() (st State, exists bool, err error) {
 		}
 		return State{}, false, lerr.Wrap(lerr.CodeGenericError, err, "cannot read state file")
 	}
-	var raw rawState
-	if _, err := toml.Decode(string(data), &raw); err != nil {
+	// decode into a zero-value State (NOT Defaults()) so a file missing
+	// schema_version doesn't silently inherit CurrentSchemaVersion and
+	// slip past the version check below.
+	if _, err := toml.Decode(string(data), &st); err != nil {
 		return State{}, false, lerr.Wrap(lerr.CodeGenericError, err, "malformed state file at "+path)
 	}
-	st = Defaults()
-	if len(raw.Projects) > 0 {
-		st.Projects = raw.Projects
-	} else if len(raw.Paths) > 0 {
-		// v1 migration: keep AgentDirs nil so callers know this entry
-		// hasn't been reconciled with central yet.
-		for name, p := range raw.Paths {
-			st.Projects[name] = ProjectEntry{Path: p}
+	if st.SchemaVersion != CurrentSchemaVersion {
+		return State{}, false, lerr.Newf(lerr.CodeInconsistency,
+			"state file at %s is schema version %d, but this lore expects %d",
+			path, st.SchemaVersion, CurrentSchemaVersion).
+			WithHint("delete the file and re-run `lore add` (or `lore link` once it ships)")
+	}
+	// enforce the ProjectEntry invariant at the trust boundary: every
+	// tracked project has at least one agent dir. AddAgentDir and
+	// RemoveAgentDir maintain this in memory, but a hand-edited state
+	// file could skip the agent_dirs key entirely and slip through
+	// otherwise, leaving Add to fail with a confusing central-side
+	// CodeConflict instead of a clear "your state file is wrong."
+	for name, entry := range st.Projects {
+		if len(entry.AgentDirs) == 0 {
+			return State{}, false, lerr.Newf(lerr.CodeInconsistency,
+				"state file at %s has no agent_dirs for project %q",
+				path, name).
+				WithHint("delete the file and re-run `lore add` (or `lore link` once it ships)")
 		}
+	}
+	if st.Projects == nil {
+		st.Projects = map[string]ProjectEntry{}
 	}
 	return st, true, nil
 }
@@ -187,7 +188,11 @@ func (s *State) RemoveAgentDir(name, dirName string) {
 	if !ok {
 		return
 	}
-	filtered := entry.AgentDirs[:0]
+	// fresh slice rather than entry.AgentDirs[:0]: in-place filtering
+	// would alias the existing backing array, so any caller still
+	// holding the old slice (or a ProjectEntry value copied earlier in
+	// the same call) would see corrupted data.
+	filtered := make([]string, 0, len(entry.AgentDirs))
 	for _, d := range entry.AgentDirs {
 		if d != dirName {
 			filtered = append(filtered, d)
@@ -198,23 +203,6 @@ func (s *State) RemoveAgentDir(name, dirName string) {
 		return
 	}
 	entry.AgentDirs = filtered
-	s.Projects[name] = entry
-}
-
-// SetAgentDirs replaces a project's tracked agent dirs wholesale.
-// Intended for the v1->v2 backfill path: once project-level code learns
-// from central what dirs a migrated entry should reference, it calls
-// SetAgentDirs so the next Save persists the v2 shape. No-op when the
-// project isn't tracked.
-func (s *State) SetAgentDirs(name string, dirs []string) {
-	if s.Projects == nil {
-		return
-	}
-	entry, ok := s.Projects[name]
-	if !ok {
-		return
-	}
-	entry.AgentDirs = append([]string(nil), dirs...)
 	s.Projects[name] = entry
 }
 

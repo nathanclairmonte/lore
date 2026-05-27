@@ -199,78 +199,51 @@ func TestAddAgentDirRejectsEmptyDirName(t *testing.T) {
 	require.Equal(t, lerr.CodeGenericError, lerr.CodeOf(err))
 }
 
-func TestSetAgentDirs(t *testing.T) {
+func TestLoadRejectsOldSchemaVersion(t *testing.T) {
+	withSandbox(t)
+	// any non-current schema is a hard error; lore is pre-1.0 and
+	// migration code is intentionally not carried.
+	path, _ := Path()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	v1 := `schema_version = 1
+
+[paths]
+my-app = "/home/x/code/my-app"
+`
+	require.NoError(t, os.WriteFile(path, []byte(v1), 0o644))
+
+	_, _, err := Load()
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeInconsistency, lerr.CodeOf(err))
+	require.Contains(t, err.Error(), "schema version 1")
+}
+
+func TestLoadRejectsZeroSchemaVersion(t *testing.T) {
+	withSandbox(t)
+	// a state file with no schema_version field at all decodes to 0;
+	// reject it the same way as an old version so a hand-edited or
+	// corrupted file doesn't silently become "valid empty state".
+	path, _ := Path()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("[projects]\n"), 0o644))
+
+	_, _, err := Load()
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeInconsistency, lerr.CodeOf(err))
+}
+
+func TestRemoveAgentDirDoesNotCorruptCallerSliceCopy(t *testing.T) {
+	// regression guard for the [:0] aliasing bug: a caller holding a
+	// ProjectEntry copy must not see its AgentDirs slice mutated when
+	// the state's copy is filtered.
 	st := Defaults()
 	require.NoError(t, st.AddAgentDir("my-app", "/home/x/code/my-app", ".claude"))
-	st.SetAgentDirs("my-app", []string{".cursor", ".aider"})
-	entry, _ := st.ProjectEntryFor("my-app")
-	require.Equal(t, []string{".cursor", ".aider"}, entry.AgentDirs)
-}
+	require.NoError(t, st.AddAgentDir("my-app", "/home/x/code/my-app", ".cursor"))
 
-func TestSetAgentDirsNoOpForUntracked(t *testing.T) {
-	st := Defaults()
-	st.SetAgentDirs("never-added", []string{".claude"})
-	_, ok := st.ProjectEntryFor("never-added")
-	require.False(t, ok)
-}
-
-func TestLoadMigratesV1State(t *testing.T) {
-	withSandbox(t)
-	// land a v1-shape state.toml on disk: schema_version=1 + paths table,
-	// no projects table. Load must lift this into the v2 shape in memory
-	// with AgentDirs=nil so the orchestrator knows to backfill.
-	path, _ := Path()
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	v1 := `schema_version = 1
-
-[paths]
-my-app = "/home/x/code/my-app"
-other = "/tmp/other"
-`
-	require.NoError(t, os.WriteFile(path, []byte(v1), 0o644))
-
-	loaded, exists, err := Load()
-	require.NoError(t, err)
-	require.True(t, exists)
-	require.Equal(t, CurrentSchemaVersion, loaded.SchemaVersion)
-	require.Len(t, loaded.Projects, 2)
-	require.Equal(t, "/home/x/code/my-app", loaded.Projects["my-app"].Path)
-	require.Nil(t, loaded.Projects["my-app"].AgentDirs,
-		"v1 migration leaves AgentDirs nil so the orchestrator knows to backfill from central")
-	require.Equal(t, "/tmp/other", loaded.Projects["other"].Path)
-	require.Nil(t, loaded.Projects["other"].AgentDirs)
-}
-
-func TestMigratedStateSurvivesSaveRoundTrip(t *testing.T) {
-	withSandbox(t)
-	// v1 on disk -> Load lifts to v2 in memory -> caller backfills via
-	// SetAgentDirs -> Save persists v2 shape. Next Load reads pure v2.
-	path, _ := Path()
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	v1 := `schema_version = 1
-
-[paths]
-my-app = "/home/x/code/my-app"
-`
-	require.NoError(t, os.WriteFile(path, []byte(v1), 0o644))
-
-	st, _, err := Load()
-	require.NoError(t, err)
-	st.SetAgentDirs("my-app", []string{".claude"})
-	require.NoError(t, Save(st))
-
-	got, _, err := Load()
-	require.NoError(t, err)
-	require.Equal(t, CurrentSchemaVersion, got.SchemaVersion)
-	entry, ok := got.ProjectEntryFor("my-app")
-	require.True(t, ok)
-	require.Equal(t, "/home/x/code/my-app", entry.Path)
-	require.Equal(t, []string{".claude"}, entry.AgentDirs)
-
-	// on-disk file must no longer carry the v1 `paths` table.
-	raw, err := os.ReadFile(path)
-	require.NoError(t, err)
-	require.NotContains(t, string(raw), "[paths]")
+	snapshot, _ := st.ProjectEntryFor("my-app")
+	st.RemoveAgentDir("my-app", ".claude")
+	require.Equal(t, []string{".claude", ".cursor"}, snapshot.AgentDirs,
+		"caller's snapshot must be untouched by a later RemoveAgentDir")
 }
 
 func TestSaveAtomicityPreservesExistingFileOnEncodeFailure(t *testing.T) {

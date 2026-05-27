@@ -747,7 +747,7 @@ func TestAddPartialFailureOneCleanOneSafetyViolation(t *testing.T) {
 	require.Equal(t, "2", count)
 }
 
-func TestAddPickerFiresPerNonIgnoredDir(t *testing.T) {
+func TestAddPickerSkipsAlreadyIgnoredDir(t *testing.T) {
 	_, projectRoot := addSandbox(t)
 	makeAgentDir(t, projectRoot, ".cursor")
 	// .claude is ignored by sandbox; .cursor is NOT. Only one picker prompt.
@@ -759,7 +759,7 @@ func TestAddPickerFiresPerNonIgnoredDir(t *testing.T) {
 		"picker fires once per non-ignored dir, not once per Add()")
 }
 
-func TestAddPickerFiresOncePerNonIgnoredDir(t *testing.T) {
+func TestAddPickerFiresOncePerDirWhenNoneIgnored(t *testing.T) {
 	_, projectRoot := addSandbox(t)
 	makeAgentDir(t, projectRoot, ".cursor")
 	// neither dir is ignored: blank info/exclude.
@@ -770,6 +770,63 @@ func TestAddPickerFiresOncePerNonIgnoredDir(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, *calls,
 		"two non-ignored dirs means two picker prompts")
+}
+
+func TestAddPickerDismissalMidLoopAbortsWithoutOnboarding(t *testing.T) {
+	// design lock-in: when the picker is dismissed for a later dir in a
+	// multi-dir run, the whole Add aborts (no central / state / commit
+	// side effects) but the .gitignore entry from any earlier picker
+	// write persists. The user's prior pick is a deliberate decision and
+	// retrying shouldn't make them re-pick it.
+	centralPath, projectRoot := addSandbox(t)
+	makeAgentDir(t, projectRoot, ".cursor")
+	unignoreSandbox(t, projectRoot)
+
+	// pick repo-gitignore for .claude; dismiss when called for .cursor.
+	// keying off the dir name (not call count) keeps the test honest if
+	// cfg.AgentDirs's default order ever flips - we're asserting
+	// behavior about which dir gets dismissed, not which call index.
+	prev := pickGitignoreTarget
+	pickGitignoreTarget = func(dirName string) (prompt.GitignoreTarget, error) {
+		if dirName == ".cursor" {
+			return 0, lerr.New(lerr.CodeRefusedSafety, "picker dismissed")
+		}
+		return prompt.TargetRepoGitignore, nil
+	}
+	t.Cleanup(func() { pickGitignoreTarget = prev })
+
+	headBefore, err := git.Run(centralPath, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	_, err = Add(AddOptions{ProjectPath: projectRoot})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
+
+	// no project tracked, no symlinks planted, no commit landed.
+	st, _, err := state.Load()
+	require.NoError(t, err)
+	_, ok := st.ProjectEntryFor("my-app")
+	require.False(t, ok, "dismissal must abort before state is touched")
+
+	headAfter, err := git.Run(centralPath, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	require.Equal(t, headBefore, headAfter, "no commit on central")
+
+	for _, name := range []string{".claude", ".cursor"} {
+		info, statErr := os.Lstat(filepath.Join(projectRoot, name))
+		require.NoError(t, statErr)
+		require.True(t, info.IsDir())
+		require.Zero(t, info.Mode()&os.ModeSymlink,
+			name+" should still be a real dir, not a symlink into central")
+	}
+
+	// but the gitignore entry the user actively picked for the first dir
+	// IS persisted - that decision survives the abort so a retry doesn't
+	// re-prompt for it.
+	got, err := os.ReadFile(filepath.Join(projectRoot, ".gitignore"))
+	require.NoError(t, err)
+	require.Contains(t, string(got), ".claude",
+		"earlier picker write must persist even when a later dir aborts the run")
 }
 
 func TestPathErrorsWhenMultipleDirsAndNoFlag(t *testing.T) {
@@ -818,35 +875,18 @@ func TestPathDirNotTracked(t *testing.T) {
 		"error must list what IS tracked so the user picks a real dir")
 }
 
-func TestAddBackfillsV1State(t *testing.T) {
-	// land a v1 state file on disk: a tracked project with no
-	// AgentDirs info. Add must backfill from central and proceed.
-	centralPath, projectRoot := addSandbox(t)
-	first, err := Add(AddOptions{ProjectPath: projectRoot})
-	require.NoError(t, err)
-	require.NotEmpty(t, first.Dirs)
+func TestAddRejectsOldSchemaState(t *testing.T) {
+	// v1 state files are no longer supported. The user is expected to
+	// delete the stale file and re-run; the migration code is gone.
+	_, projectRoot := addSandbox(t)
 
-	// hand-rewrite state to v1 shape to simulate an upgrade-in-place.
 	statePath, err := state.Path()
 	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(statePath), 0o755))
 	v1 := "schema_version = 1\n\n[paths]\nmy-app = \"" + projectRoot + "\"\n"
 	require.NoError(t, os.WriteFile(statePath, []byte(v1), 0o644))
 
-	// re-running Add should backfill AgentDirs from central and return
-	// AlreadyTracked without erroring.
-	res, err := Add(AddOptions{ProjectPath: projectRoot})
-	require.NoError(t, err)
-	require.True(t, res.AllAlreadyTracked())
-
-	// state on disk is now v2 with the backfilled dir.
-	st, _, err := state.Load()
-	require.NoError(t, err)
-	require.Equal(t, state.CurrentSchemaVersion, st.SchemaVersion)
-	entry, _ := st.ProjectEntryFor("my-app")
-	require.Equal(t, []string{".claude"}, entry.AgentDirs)
-
-	// central HEAD unchanged: backfill is a state-only operation.
-	count, err := git.Run(centralPath, "rev-list", "--count", "HEAD")
-	require.NoError(t, err)
-	require.Equal(t, "2", count, "no new commit from backfill")
+	_, err = Add(AddOptions{ProjectPath: projectRoot})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeInconsistency, lerr.CodeOf(err))
 }

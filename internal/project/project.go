@@ -123,33 +123,13 @@ func Add(opts AddOptions) (AddResult, error) {
 	projectName := filepath.Base(projectPath)
 
 	trackedEntry, isTracked := st.ProjectEntryFor(projectName)
-	if isTracked {
+	if isTracked && trackedEntry.Path != projectPath {
 		// drift check: same project name pointing at a different path is
 		// a conflict the orchestrator can't silently resolve. Catch it
 		// before any per-dir work so the user sees the cleanest error.
-		if trackedEntry.Path != projectPath {
-			return AddResult{}, lerr.Newf(lerr.CodeConflict,
-				"project %q is already tracked at %s",
-				projectName, config.Contract(trackedEntry.Path))
-		}
-		// v1->v2 migration backfill: state entries migrated from v1 carry
-		// AgentDirs=nil. Central is the source of truth for what dirs
-		// belong to a project; populate from there and persist the v2
-		// shape so subsequent runs don't re-do the work.
-		if trackedEntry.AgentDirs == nil {
-			dirs, dirErr := c.ProjectAgentDirs(projectName)
-			if dirErr != nil {
-				return AddResult{}, lerr.Newf(lerr.CodeInconsistency,
-					"state says %q is tracked but central has no agent dirs for it",
-					projectName).
-					WithHint("remove the stale state entry and re-run, or run `lore doctor` once it ships")
-			}
-			st.SetAgentDirs(projectName, dirs)
-			if saveErr := state.Save(st); saveErr != nil {
-				return AddResult{}, saveErr
-			}
-			trackedEntry.AgentDirs = dirs
-		}
+		return AddResult{}, lerr.Newf(lerr.CodeConflict,
+			"project %q is already tracked at %s",
+			projectName, config.Contract(trackedEntry.Path))
 	}
 
 	detected, err := detect.DetectAgentDirs(projectPath, cfg.AgentDirs)
@@ -157,11 +137,14 @@ func Add(opts AddOptions) (AddResult, error) {
 		return AddResult{}, err
 	}
 
-	// in auto-detect mode (no --dir), also surface bare-symlink candidates
-	// that DetectAgentDirs skipped. they're slice-3 safety cases: a stale
-	// .claude symlink the user has left around but lore hasn't onboarded.
-	// without this, an untracked symlinked candidate would silently produce
-	// a "no agent directory found" instead of the proper safety refusal.
+	// surface bare-symlink candidates that DetectAgentDirs skipped:
+	// slice-3 safety cases (a stale .claude symlink the user left around
+	// but lore hasn't onboarded). without this, an untracked symlinked
+	// candidate would silently produce a "no agent directory found"
+	// instead of the proper safety refusal. resolveSelection ignores the
+	// result in --dir mode, so the Lstat work is unused there, but the
+	// candidate list is small and the gate's not worth a cross-function
+	// invariant.
 	symlinkedNames, err := untrackedSymlinkCandidates(projectPath, cfg.AgentDirs, trackedEntry.AgentDirs)
 	if err != nil {
 		return AddResult{}, err
@@ -200,7 +183,7 @@ func Add(opts AddOptions) (AddResult, error) {
 		info, statErr := os.Lstat(path)
 		if statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {
-				return AddResult{}, missingDirError(name, projectPath, detected)
+				return AddResult{}, missingDirError(name, projectPath, detected, trackedEntry.AgentDirs)
 			}
 			return AddResult{}, lerr.Wrap(lerr.CodeGenericError, statErr,
 				fmt.Sprintf("cannot stat %s", path))
@@ -208,7 +191,7 @@ func Add(opts AddOptions) (AddResult, error) {
 		if info.Mode()&os.ModeSymlink == 0 && !info.IsDir() {
 			// regular file at this name. user-explicit --dir was unambiguous,
 			// so surface as a not-found rather than silently skipping.
-			return AddResult{}, missingDirError(name, projectPath, detected)
+			return AddResult{}, missingDirError(name, projectPath, detected, trackedEntry.AgentDirs)
 		}
 		// either a real dir (the normal case) or a symlink (slice-3
 		// safety case). CheckSafetyAll handles both: symlinks produce
@@ -240,9 +223,17 @@ func Add(opts AddOptions) (AddResult, error) {
 	// gitignore precheck + picker, per dir. all writes here land BEFORE
 	// the success-gated unwind region: a picker dismissal or a write
 	// failure aborts the whole run without any central / state / commit
-	// side effects landing. once one picker write succeeds the entry
-	// itself is correct either way (it stays correct on retry), so we
-	// don't rewind it.
+	// side effects landing.
+	//
+	// Asymmetry vs. safety violations is deliberate: a safety violation
+	// on dir B lets dir A proceed (it's a mechanical refusal), but a
+	// picker dismissal on dir B aborts the whole run (it's an active
+	// "no" from the user). Earlier picker writes are NOT rewound on
+	// abort: the .gitignore entry the user actively chose for dir A is
+	// already a correct decision they made, and retrying after fixing
+	// the dismissed dir shouldn't re-prompt them for choices they've
+	// already made. The .gitignore file is also user-owned; treating
+	// edits to it as lore-reversible side effects overclaims ownership.
 	var repoTop string
 	for _, d := range toOnboard {
 		ignored, err := git.CheckIgnore(projectPath, d.Name)
@@ -420,35 +411,13 @@ func Path(projectName, dirName string) (string, error) {
 		return "", err
 	}
 
-	// v1->v2 backfill, mirroring Add's path. Path is read-only otherwise,
-	// but populating state once here saves a backfill on every future
-	// invocation.
 	dirs := entry.AgentDirs
-	if dirs == nil {
-		fromCentral, dirErr := c.ProjectAgentDirs(projectName)
-		if dirErr != nil {
-			return "", lerr.Newf(lerr.CodeInconsistency,
-				"state says %q is tracked but central has no agent dirs for it",
-				projectName).
-				WithHint("remove the stale state entry and re-run, or run `lore doctor` once it ships")
-		}
-		st.SetAgentDirs(projectName, fromCentral)
-		// best-effort: the read still succeeds even if persisting fails,
-		// but surface the failure so a silent stuck-on-v1 state file
-		// isn't invisible to the user (Path is read-only otherwise, but
-		// repeated backfills mean repeated central reads every run).
-		if saveErr := state.Save(st); saveErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: cannot persist v2 state migration: %v\n", saveErr)
-		}
-		dirs = fromCentral
-	}
-
 	if dirName == "" {
 		switch len(dirs) {
 		case 0:
-			// shouldn't happen after backfill, but defend in depth.
-			return "", lerr.Newf(lerr.CodeNotFound,
-				"project %q has no agent dirs tracked", projectName)
+			return "", lerr.Newf(lerr.CodeInconsistency,
+				"project %q is tracked but has no agent dirs recorded", projectName).
+				WithHint("remove the stale state entry and re-run `lore add`")
 		case 1:
 			return c.ProjectPath(projectName, dirs[0]), nil
 		default:
@@ -561,17 +530,39 @@ func untrackedSymlinkCandidates(root string, candidates, tracked []string) ([]st
 
 // missingDirError builds the error returned when the user explicitly
 // asked for an agent dir that isn't present at the project root.
-// Listing what WAS detected gives the user a concrete next step rather
-// than just "not found".
-func missingDirError(name, projectPath string, detected []detect.AgentDir) error {
-	if len(detected) == 0 {
+// Suggestions distinguish detected (fresh candidates at the project
+// root the user could onboard) from tracked-only (already-onboarded
+// dirs the user could --dir back into for an idempotent re-run):
+// different next steps for different intents. Detected names that
+// are also tracked render under "detected:" only, since they're
+// usable for either intent.
+func missingDirError(name, projectPath string, detected []detect.AgentDir, tracked []string) error {
+	detectedNames := namesOf(detected)
+	detectedSet := map[string]bool{}
+	for _, n := range detectedNames {
+		detectedSet[n] = true
+	}
+	trackedOnly := make([]string, 0, len(tracked))
+	for _, n := range tracked {
+		if !detectedSet[n] {
+			trackedOnly = append(trackedOnly, n)
+		}
+	}
+	var hints []string
+	if len(detectedNames) > 0 {
+		hints = append(hints, "detected: "+strings.Join(detectedNames, ", "))
+	}
+	if len(trackedOnly) > 0 {
+		hints = append(hints, "tracked: "+strings.Join(trackedOnly, ", "))
+	}
+	if len(hints) == 0 {
 		return lerr.Newf(lerr.CodeNotFound,
 			"%s not found at %s and no other agent dirs were detected",
 			name, config.Contract(projectPath))
 	}
 	return lerr.Newf(lerr.CodeNotFound,
-		"%s not found at %s; detected: %s",
-		name, config.Contract(projectPath), strings.Join(namesOf(detected), ", "))
+		"%s not found at %s (%s)",
+		name, config.Contract(projectPath), strings.Join(hints, "; "))
 }
 
 // namesOf extracts the Name field from a slice of AgentDir.
