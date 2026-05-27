@@ -91,7 +91,11 @@ func CheckSafety(root string, candidates []string) ([]Violation, error) {
 	var violations []Violation
 
 	// nested .git check. Stat (not Lstat) so a .git that's itself a
-	// symlink into a real git repo still counts.
+	// symlink into a real git repo still counts. A non-NotExist stat
+	// error (permission denied, etc.) is deliberately swallowed here:
+	// it shouldn't poison the whole check -- the tracked-file probe
+	// below still runs, mirroring the Readlink fallback above, so the
+	// user gets every signal we CAN produce.
 	if _, statErr := os.Stat(filepath.Join(path, ".git")); statErr == nil {
 		violations = append(violations, Violation{
 			Kind: ViolationNestedGit,
@@ -103,12 +107,6 @@ func CheckSafety(root string, candidates []string) ([]Violation, error) {
 					"this project.",
 				name),
 		})
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		// a real fs error (permission denied, etc.) shouldn't poison the
-		// whole check: still run the tracked-file probe so the user gets
-		// every signal we CAN produce. mirrors the Readlink fallback
-		// above. if the user has a more fundamental fs problem they'll
-		// see it from the tracked-file path or from a later command.
 	}
 
 	// tracked-file check. ListTrackedUnder folds the not-a-git-repo

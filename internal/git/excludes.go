@@ -128,15 +128,23 @@ func AppendIgnoreEntry(path, entry string) error {
 		return lerr.Wrap(lerr.CodeGenericError, err,
 			fmt.Sprintf("cannot open %s for appending", path))
 	}
-	defer f.Close()
 
 	payload := entry + "\n"
 	if needsLeadingNewline {
 		payload = "\n" + payload
 	}
-	if _, err := f.WriteString(payload); err != nil {
-		return lerr.Wrap(lerr.CodeGenericError, err,
+	if _, werr := f.WriteString(payload); werr != nil {
+		// best-effort close on the failure path; we'd rather surface
+		// the write error than mask it with a close error.
+		_ = f.Close()
+		return lerr.Wrap(lerr.CodeGenericError, werr,
 			fmt.Sprintf("cannot append to %s", path))
+	}
+	// on the success path the close error matters: buffered data can
+	// still fail to flush, leaving the entry truncated on disk.
+	if cerr := f.Close(); cerr != nil {
+		return lerr.Wrap(lerr.CodeGenericError, cerr,
+			fmt.Sprintf("cannot close %s after appending", path))
 	}
 	return nil
 }
