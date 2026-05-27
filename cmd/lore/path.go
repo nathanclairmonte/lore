@@ -7,15 +7,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newPathCmd builds the `lore path` cobra subcommand. Two modes:
+// newPathCmd builds the `lore path` cobra subcommand. Modes:
 //
 //   - `lore path <name>` prints the central-side path of that project's
-//     (single, in slice 2) agent directory.
+//     agent directory. If the project has multiple, errors with a hint
+//     to pass --dir.
+//   - `lore path <name> --dir <agent-dir>` prints the central-side path
+//     of the specific tracked agent dir.
 //   - `lore path --repo` prints the central repo path itself.
-//
-// Slice 5 will add `--dir <name>` for projects with multiple agent dirs.
 func newPathCmd() *cobra.Command {
 	var repoFlag bool
+	var dirFlag string
 	cmd := &cobra.Command{
 		Use:   "path [name]",
 		Short: "Print the central-repo path of a tracked project (or the repo itself)",
@@ -34,6 +36,11 @@ func newPathCmd() *cobra.Command {
 					return lerr.New(lerr.CodeGenericError,
 						"lore path: --repo takes no arguments")
 				}
+				if dirFlag != "" {
+					_ = cmd.Usage()
+					return lerr.New(lerr.CodeGenericError,
+						"lore path: --repo and --dir are mutually exclusive")
+				}
 				p, err := project.PathRepo()
 				if err != nil {
 					return err
@@ -46,7 +53,7 @@ func newPathCmd() *cobra.Command {
 				return lerr.New(lerr.CodeGenericError,
 					"lore path requires a project name (or --repo)")
 			}
-			p, err := project.Path(args[0])
+			p, err := project.Path(args[0], dirFlag)
 			if err != nil {
 				return err
 			}
@@ -55,5 +62,7 @@ func newPathCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&repoFlag, "repo", false, "Print the central repository path")
+	cmd.Flags().StringVar(&dirFlag, "dir", "",
+		"agent dir to print (required when the project has multiple)")
 	return cmd
 }

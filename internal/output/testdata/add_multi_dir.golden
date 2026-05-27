@@ -1,0 +1,9 @@
+✓ Project:   my-app (~/code/my-app)
+
+→ Moved  .claude  →  ~/agent-context/projects/my-app/.claude
+→ Linked .claude  ←  ~/agent-context/projects/my-app/.claude
+→ Moved  .cursor  →  ~/agent-context/projects/my-app/.cursor
+→ Linked .cursor  ←  ~/agent-context/projects/my-app/.cursor
+✓ Committed to central repo: "feat: add my-app"
+
+Next: cd ~/agent-context && git push

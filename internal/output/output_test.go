@@ -135,10 +135,61 @@ func sampleAddResult() AddResult {
 	return AddResult{
 		ProjectName:   "my-app",
 		ProjectPath:   "/home/u/code/my-app",
-		AgentDirName:  ".claude",
-		CentralPath:   "/home/u/agent-context/projects/my-app/.claude",
 		CentralRepo:   "/home/u/agent-context",
 		CommitMessage: "feat: add my-app",
+		Dirs: []AddDirResult{{
+			Name:        ".claude",
+			Status:      StatusAdded,
+			CentralPath: "/home/u/agent-context/projects/my-app/.claude",
+		}},
+	}
+}
+
+// sampleMultiAddResult covers the slice-5 multi-dir case (two dirs
+// added in one run). golden locks the per-dir block iteration in place.
+func sampleMultiAddResult() AddResult {
+	return AddResult{
+		ProjectName:   "my-app",
+		ProjectPath:   "/home/u/code/my-app",
+		CentralRepo:   "/home/u/agent-context",
+		CommitMessage: "feat: add my-app",
+		Dirs: []AddDirResult{
+			{
+				Name:        ".claude",
+				Status:      StatusAdded,
+				CentralPath: "/home/u/agent-context/projects/my-app/.claude",
+			},
+			{
+				Name:        ".cursor",
+				Status:      StatusAdded,
+				CentralPath: "/home/u/agent-context/projects/my-app/.cursor",
+			},
+		},
+	}
+}
+
+// samplePartialAddResult covers the slice-5 partial-failure case: one
+// dir landed, one was refused for safety. golden locks the layout: the
+// added block renders normally, the skipped block follows with a "warn"
+// header and the violation message indented under it.
+func samplePartialAddResult() AddResult {
+	return AddResult{
+		ProjectName:   "my-app",
+		ProjectPath:   "/home/u/code/my-app",
+		CentralRepo:   "/home/u/agent-context",
+		CommitMessage: "feat: add my-app",
+		Dirs: []AddDirResult{
+			{
+				Name:        ".cursor",
+				Status:      StatusAdded,
+				CentralPath: "/home/u/agent-context/projects/my-app/.cursor",
+			},
+			{
+				Name:           ".claude",
+				Status:         StatusSkippedSafety,
+				SafetyMessages: []string{".claude/ contains files tracked by this repo's git."},
+			},
+		},
 	}
 }
 
@@ -156,13 +207,38 @@ func TestGolden_PrintAddResult_Fresh_ASCII(t *testing.T) {
 	assertGolden(t, "add_fresh_ascii", out.String())
 }
 
+func TestGolden_PrintAddResult_MultiDir(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	out, _ := withCleanState(t, true)
+	PrintAddResult(sampleMultiAddResult())
+	assertGolden(t, "add_multi_dir", out.String())
+}
+
+func TestGolden_PrintAddResult_PartialFailure(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	out, _ := withCleanState(t, true)
+	PrintAddResult(samplePartialAddResult())
+	assertGolden(t, "add_partial_failure", out.String())
+}
+
 func TestGolden_PrintAddResult_AlreadyTracked(t *testing.T) {
 	t.Setenv("HOME", "/home/u")
 	out, _ := withCleanState(t, true)
 	r := sampleAddResult()
-	r.AlreadyTracked = true
+	r.Dirs[0].Status = StatusAlreadyTracked
 	PrintAddResult(r)
 	assertGolden(t, "add_already_tracked", out.String())
+}
+
+func TestGolden_PrintAddResult_AlreadyTrackedMultiDir(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	out, _ := withCleanState(t, true)
+	r := sampleMultiAddResult()
+	r.Dirs[0].Status = StatusAlreadyTracked
+	r.Dirs[1].Status = StatusAlreadyTracked
+	r.CommitMessage = ""
+	PrintAddResult(r)
+	assertGolden(t, "add_already_tracked_multi", out.String())
 }
 
 func sampleInitResult(hasRemote, recreated bool) InitResult {

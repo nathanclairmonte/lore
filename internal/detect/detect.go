@@ -1,10 +1,6 @@
 // Package detect inspects a project root and decides which agent
 // directory(ies) lore should onboard. Pure filesystem logic; no config or
 // state knowledge.
-//
-// Slice 2 returns only the first match in the candidates list to keep the
-// single-agent-dir use case shippable. Slice 5 expands to multi-dir,
-// where this package will return every matching dir.
 package detect
 
 import (
@@ -22,20 +18,23 @@ type AgentDir struct {
 	Path string // absolute path on disk
 }
 
-// DetectAgentDir scans root for the first entry in candidates that is a
+// DetectAgentDirs scans root for every entry in candidates that is a
 // real directory (not a symlink, not a regular file). Iteration follows
 // the order in candidates so callers control precedence via
-// config.AgentDirs.
+// config.AgentDirs and `lore add` preserves a stable per-run order.
 //
-// Symlinked candidates are intentionally skipped in slice 2: an agent dir
-// that's already a symlink is a slice-3 safety case, and detecting it as
-// a "valid agent dir" would let `lore add` re-onboard a tracked project
-// without surfacing the conflict. Skipping means the user gets a clear
-// "no agent dir found" if every candidate is either absent or a symlink.
+// Symlinked candidates are intentionally skipped: an agent dir that's
+// already a symlink is the post-add steady state (lore replaces the
+// directory with a symlink into central), so detecting them would re-
+// onboard tracked projects. The slice-3 symlink safety case is surfaced
+// by CheckSafetyAll when the user passes such a name explicitly via
+// `--dir`; in auto-detect mode we silently skip, matching slice 3's
+// "lore polices what it manages" stance.
 //
-// Returns (AgentDir{}, false, nil) when nothing matches. Errors only on
-// unexpected stat failures (permission, etc.).
-func DetectAgentDir(root string, candidates []string) (AgentDir, bool, error) {
+// Returns an empty slice when nothing matches (never a nil-vs-empty
+// distinction). Errors only on unexpected stat failures (permission etc).
+func DetectAgentDirs(root string, candidates []string) ([]AgentDir, error) {
+	dirs := make([]AgentDir, 0, len(candidates))
 	for _, name := range candidates {
 		path := filepath.Join(root, name)
 		info, err := os.Lstat(path)
@@ -43,7 +42,7 @@ func DetectAgentDir(root string, candidates []string) (AgentDir, bool, error) {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return AgentDir{}, false, lerr.Wrap(lerr.CodeGenericError, err,
+			return nil, lerr.Wrap(lerr.CodeGenericError, err,
 				fmt.Sprintf("cannot stat %s", path))
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
@@ -52,7 +51,7 @@ func DetectAgentDir(root string, candidates []string) (AgentDir, bool, error) {
 		if !info.IsDir() {
 			continue
 		}
-		return AgentDir{Name: name, Path: path}, true, nil
+		dirs = append(dirs, AgentDir{Name: name, Path: path})
 	}
-	return AgentDir{}, false, nil
+	return dirs, nil
 }

@@ -103,28 +103,32 @@ func TestAddHappyPath(t *testing.T) {
 
 	require.Equal(t, "my-app", res.ProjectName)
 	require.Equal(t, projectRoot, res.ProjectPath)
-	require.Equal(t, ".claude", res.AgentDirName)
 	require.Equal(t, centralPath, res.CentralRepo)
+	require.Equal(t, "feat: add my-app", res.CommitMessage)
+	require.False(t, res.AllAlreadyTracked())
+
+	require.Len(t, res.Dirs, 1)
+	require.Equal(t, ".claude", res.Dirs[0].Name)
+	require.Equal(t, StatusAdded, res.Dirs[0].Status)
 	require.Equal(t,
 		filepath.Join(centralPath, "projects", "my-app", ".claude"),
-		res.CentralPath)
-	require.Equal(t, "feat: add my-app", res.CommitMessage)
-	require.False(t, res.AlreadyTracked)
+		res.Dirs[0].CentralPath)
 
 	// symlink is in place and points where we expect.
 	require.NoError(t, link.Validate(
 		filepath.Join(projectRoot, ".claude"),
-		res.CentralPath))
+		res.Dirs[0].CentralPath))
 
 	// central contents survived the move.
-	require.FileExists(t, filepath.Join(res.CentralPath, "CLAUDE.md"))
+	require.FileExists(t, filepath.Join(res.Dirs[0].CentralPath, "CLAUDE.md"))
 
-	// state recorded.
+	// state recorded with the agent dir set.
 	st, _, err := state.Load()
 	require.NoError(t, err)
-	got, ok := st.PathFor("my-app")
+	entry, ok := st.ProjectEntryFor("my-app")
 	require.True(t, ok)
-	require.Equal(t, projectRoot, got)
+	require.Equal(t, projectRoot, entry.Path)
+	require.Equal(t, []string{".claude"}, entry.AgentDirs)
 
 	// commit landed on central with the templated message.
 	msg, err := git.Run(centralPath, "log", "-1", "--pretty=%s")
@@ -164,19 +168,21 @@ func TestAddPickerWritesRepoGitignoreAndProceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, *calls, "picker should fire once when not ignored")
 
-	// .gitignore at repo root got the entry. exact-match so a regression
-	// reintroducing the trailing slash (which fails to match the post-move
-	// symlink) is caught here.
+	// .gitignore at repo root got the entry. Leading slash (slice-5
+	// followup fold-in) anchors the pattern to the repo root rather
+	// than matching .claude/ inside arbitrary subdirs. No trailing slash
+	// because the post-move symlink wouldn't match a dir-only pattern.
 	got, err := os.ReadFile(filepath.Join(projectRoot, ".gitignore"))
 	require.NoError(t, err)
-	require.Equal(t, ".claude\n", string(got))
+	require.Equal(t, "/.claude\n", string(got))
 
 	// the rest of Add ran: central + symlink + state + commit.
+	require.Len(t, res.Dirs, 1)
 	require.Equal(t,
 		filepath.Join(centralPath, "projects", "my-app", ".claude"),
-		res.CentralPath)
+		res.Dirs[0].CentralPath)
 	require.NoError(t, link.Validate(
-		filepath.Join(projectRoot, ".claude"), res.CentralPath))
+		filepath.Join(projectRoot, ".claude"), res.Dirs[0].CentralPath))
 }
 
 func TestAddPickerWritesGlobalExcludesAndProceeds(t *testing.T) {
@@ -190,7 +196,9 @@ func TestAddPickerWritesGlobalExcludesAndProceeds(t *testing.T) {
 
 	// addSandbox set HOME and XDG_CONFIG_HOME to temp dirs; with no
 	// core.excludesFile configured, the helper falls through to
-	// $XDG_CONFIG_HOME/git/ignore. assert it landed there.
+	// $XDG_CONFIG_HOME/git/ignore. assert it landed there. Bare pattern
+	// (no leading slash): global patterns shouldn't be path-anchored or
+	// they'd defeat the point of a machine-wide rule.
 	xdg := os.Getenv("XDG_CONFIG_HOME")
 	require.NotEmpty(t, xdg)
 	got, err := os.ReadFile(filepath.Join(xdg, "git", "ignore"))
@@ -209,10 +217,11 @@ func TestAddPickerWritesRepoExcludeAndProceeds(t *testing.T) {
 
 	// .git/info/exclude contains the entry now. unignoreSandbox emptied
 	// the file at setup time, so the exact-match assertion catches a
-	// trailing-slash regression cleanly.
+	// missing-anchor regression cleanly. Leading slash anchors the
+	// pattern to the repo root, same policy as the repo .gitignore case.
 	got, err := os.ReadFile(filepath.Join(projectRoot, ".git", "info", "exclude"))
 	require.NoError(t, err)
-	require.Equal(t, ".claude\n", string(got))
+	require.Equal(t, "/.claude\n", string(got))
 }
 
 func TestAddPickerDismissAbortsWithNoSideEffects(t *testing.T) {
@@ -323,9 +332,14 @@ func TestAddPickerWritesToRepoToplevelForMonorepoSubdir(t *testing.T) {
 	require.NoError(t, err)
 
 	// entry must land in the repo's root .gitignore, not in the subdir.
+	// Pattern is anchored to the SUBDIR's location relative to the repo
+	// root so the ignore rule actually fires for the project's .claude
+	// (a bare ".claude" at the repo root would only match ./.claude, not
+	// services/foo/.claude). The leading "/" anchors to the .gitignore
+	// file's directory; the relative path scopes to the subdir.
 	gotRoot, err := os.ReadFile(filepath.Join(repoRoot, ".gitignore"))
 	require.NoError(t, err)
-	require.Equal(t, ".claude\n", string(gotRoot))
+	require.Equal(t, "/services/foo/.claude\n", string(gotRoot))
 	_, subStatErr := os.Stat(filepath.Join(subProject, ".gitignore"))
 	require.True(t, os.IsNotExist(subStatErr),
 		"no stray .gitignore at the subdir level")
@@ -375,12 +389,14 @@ func TestAddIdempotentReRun(t *testing.T) {
 
 	first, err := Add(AddOptions{ProjectPath: projectRoot})
 	require.NoError(t, err)
-	require.False(t, first.AlreadyTracked)
+	require.False(t, first.AllAlreadyTracked())
+	require.Equal(t, StatusAdded, first.Dirs[0].Status)
 
 	second, err := Add(AddOptions{ProjectPath: projectRoot})
 	require.NoError(t, err)
-	require.True(t, second.AlreadyTracked)
-	require.Equal(t, first.CentralPath, second.CentralPath)
+	require.True(t, second.AllAlreadyTracked())
+	require.Equal(t, first.Dirs[0].CentralPath, second.Dirs[0].CentralPath)
+	require.Empty(t, second.CommitMessage, "no commit fires on idempotent re-run")
 }
 
 func TestAddDriftedStateConflicts(t *testing.T) {
@@ -544,14 +560,20 @@ func TestAddRefusalLeavesFilesystemUntouched(t *testing.T) {
 
 func TestRenderAddTemplate(t *testing.T) {
 	require.Equal(t, "feat: add my-app",
-		renderAddTemplate("feat: add {project}", "my-app"))
+		renderAddTemplate("feat: add {project}", "my-app", []string{".claude"}))
 	// empty template falls back to a safe default so a misconfigured
 	// commit.add_template doesn't break Add with a blank commit message.
 	require.Equal(t, "feat: add my-app",
-		renderAddTemplate("", "my-app"))
-	// no {project} placeholder -> template returned verbatim.
+		renderAddTemplate("", "my-app", []string{".claude"}))
+	// no placeholder -> template returned verbatim.
 	require.Equal(t, "static message",
-		renderAddTemplate("static message", "my-app"))
+		renderAddTemplate("static message", "my-app", []string{".claude"}))
+	// {dirs} expands to a comma-joined list, the slice-5 multi-dir
+	// case. Order in the slice is preserved so the user sees a
+	// deterministic message.
+	require.Equal(t, "feat: add my-app (.claude, .cursor)",
+		renderAddTemplate("feat: add {project} ({dirs})", "my-app",
+			[]string{".claude", ".cursor"}))
 }
 
 func TestPathReturnsCentralAgentDir(t *testing.T) {
@@ -559,7 +581,7 @@ func TestPathReturnsCentralAgentDir(t *testing.T) {
 	_, err := Add(AddOptions{ProjectPath: projectRoot})
 	require.NoError(t, err)
 
-	got, err := Path("my-app")
+	got, err := Path("my-app", "")
 	require.NoError(t, err)
 	require.Equal(t,
 		filepath.Join(centralPath, "projects", "my-app", ".claude"),
@@ -568,7 +590,7 @@ func TestPathReturnsCentralAgentDir(t *testing.T) {
 
 func TestPathUntracked(t *testing.T) {
 	addSandbox(t)
-	_, err := Path("never-added")
+	_, err := Path("never-added", "")
 	require.Error(t, err)
 	require.Equal(t, lerr.CodeNotFound, lerr.CodeOf(err))
 }
@@ -578,4 +600,253 @@ func TestPathRepo(t *testing.T) {
 	got, err := PathRepo()
 	require.NoError(t, err)
 	require.Equal(t, centralPath, got)
+}
+
+// --- slice 5 multi-dir tests -------------------------------------------
+
+// makeAgentDir creates an agent dir with a single placeholder file
+// inside projectRoot. Helper for multi-dir setup.
+func makeAgentDir(t *testing.T, projectRoot, name string) {
+	t.Helper()
+	dir := filepath.Join(projectRoot, name)
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "CONTEXT.md"),
+		[]byte("ctx"), 0o644))
+}
+
+func TestAddMultiDirOnboardsAllByDefault(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	// addSandbox already puts .claude/ in place; layer on .cursor/.
+	makeAgentDir(t, projectRoot, ".cursor")
+	// ignore .cursor too so the picker doesn't fire for either dir.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".git", "info", "exclude"),
+		[]byte(".claude/\n.cursor/\n"), 0o644))
+
+	res, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.Len(t, res.Dirs, 2)
+
+	gotNames := map[string]DirStatus{}
+	for _, d := range res.Dirs {
+		gotNames[d.Name] = d.Status
+	}
+	require.Equal(t, StatusAdded, gotNames[".claude"])
+	require.Equal(t, StatusAdded, gotNames[".cursor"])
+
+	// state records both dirs under one project entry.
+	st, _, err := state.Load()
+	require.NoError(t, err)
+	entry, ok := st.ProjectEntryFor("my-app")
+	require.True(t, ok)
+	require.ElementsMatch(t, []string{".claude", ".cursor"}, entry.AgentDirs)
+
+	// ONE commit covers both dirs.
+	count, err := git.Run(centralPath, "rev-list", "--count", "HEAD")
+	require.NoError(t, err)
+	require.Equal(t, "2", count, "central HEAD should have advanced by exactly one commit")
+}
+
+func TestAddDirFlagScopesToSubset(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	makeAgentDir(t, projectRoot, ".cursor")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".git", "info", "exclude"),
+		[]byte(".claude/\n.cursor/\n"), 0o644))
+
+	// only .cursor; .claude must remain a real dir on disk and not in state.
+	res, err := Add(AddOptions{ProjectPath: projectRoot, Dirs: []string{".cursor"}})
+	require.NoError(t, err)
+	require.Len(t, res.Dirs, 1)
+	require.Equal(t, ".cursor", res.Dirs[0].Name)
+	require.Equal(t, StatusAdded, res.Dirs[0].Status)
+
+	// .claude still a regular directory (not a symlink) at the project root.
+	info, statErr := os.Lstat(filepath.Join(projectRoot, ".claude"))
+	require.NoError(t, statErr)
+	require.True(t, info.IsDir())
+	require.Zero(t, info.Mode()&os.ModeSymlink)
+
+	st, _, err := state.Load()
+	require.NoError(t, err)
+	entry, _ := st.ProjectEntryFor("my-app")
+	require.Equal(t, []string{".cursor"}, entry.AgentDirs)
+}
+
+func TestAddDirFlagExtendsTrackedProject(t *testing.T) {
+	// onboard .claude first, then run again with --dir .cursor to extend.
+	_, projectRoot := addSandbox(t)
+
+	first, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.Len(t, first.Dirs, 1)
+
+	makeAgentDir(t, projectRoot, ".cursor")
+	// .cursor wasn't ignored at sandbox setup; add the rule so the picker doesn't fire.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".git", "info", "exclude"),
+		[]byte(".claude/\n.cursor/\n"), 0o644))
+
+	res, err := Add(AddOptions{ProjectPath: projectRoot, Dirs: []string{".cursor"}})
+	require.NoError(t, err)
+	require.Len(t, res.Dirs, 1)
+	require.Equal(t, ".cursor", res.Dirs[0].Name)
+	require.Equal(t, StatusAdded, res.Dirs[0].Status)
+
+	// state now lists both dirs under my-app.
+	st, _, err := state.Load()
+	require.NoError(t, err)
+	entry, _ := st.ProjectEntryFor("my-app")
+	require.ElementsMatch(t, []string{".claude", ".cursor"}, entry.AgentDirs)
+}
+
+func TestAddDirFlagErrorsOnMissing(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	// only .claude exists; --dir .nope should hard-error.
+	_, err := Add(AddOptions{ProjectPath: projectRoot, Dirs: []string{".nope"}})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeNotFound, lerr.CodeOf(err))
+	require.Contains(t, err.Error(), ".nope")
+	require.Contains(t, err.Error(), ".claude",
+		"error must list what WAS detected so the user can pick a real candidate")
+}
+
+func TestAddPartialFailureOneCleanOneSafetyViolation(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	makeAgentDir(t, projectRoot, ".cursor")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".git", "info", "exclude"),
+		[]byte(".claude/\n.cursor/\n"), 0o644))
+
+	// trip .claude's tracked-files safety gate; .cursor stays clean.
+	_, err := git.Run(projectRoot, "add", "-f", ".claude/CLAUDE.md")
+	require.NoError(t, err)
+
+	res, err := Add(AddOptions{ProjectPath: projectRoot})
+	// per-dir semantics: error code reflects "something was refused",
+	// but the result still carries the successful add.
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
+	require.Len(t, res.Dirs, 2)
+
+	statusByName := map[string]DirStatus{}
+	for _, d := range res.Dirs {
+		statusByName[d.Name] = d.Status
+	}
+	require.Equal(t, StatusSkippedSafety, statusByName[".claude"])
+	require.Equal(t, StatusAdded, statusByName[".cursor"])
+
+	// .cursor IS tracked in state; .claude is NOT.
+	st, _, _ := state.Load()
+	entry, _ := st.ProjectEntryFor("my-app")
+	require.Equal(t, []string{".cursor"}, entry.AgentDirs)
+
+	// one commit covers .cursor only (HEAD advanced by 1).
+	count, err := git.Run(centralPath, "rev-list", "--count", "HEAD")
+	require.NoError(t, err)
+	require.Equal(t, "2", count)
+}
+
+func TestAddPickerFiresPerNonIgnoredDir(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	makeAgentDir(t, projectRoot, ".cursor")
+	// .claude is ignored by sandbox; .cursor is NOT. Only one picker prompt.
+	calls := stubPicker(t, prompt.TargetRepoGitignore, nil)
+
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.Equal(t, 1, *calls,
+		"picker fires once per non-ignored dir, not once per Add()")
+}
+
+func TestAddPickerFiresOncePerNonIgnoredDir(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	makeAgentDir(t, projectRoot, ".cursor")
+	// neither dir is ignored: blank info/exclude.
+	unignoreSandbox(t, projectRoot)
+
+	calls := stubPicker(t, prompt.TargetRepoGitignore, nil)
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.Equal(t, 2, *calls,
+		"two non-ignored dirs means two picker prompts")
+}
+
+func TestPathErrorsWhenMultipleDirsAndNoFlag(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	makeAgentDir(t, projectRoot, ".cursor")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".git", "info", "exclude"),
+		[]byte(".claude/\n.cursor/\n"), 0o644))
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+
+	_, err = Path("my-app", "")
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeConflict, lerr.CodeOf(err))
+	require.Contains(t, err.Error(), "--dir")
+	require.Contains(t, err.Error(), ".claude")
+	require.Contains(t, err.Error(), ".cursor")
+}
+
+func TestPathSelectsSpecificDir(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	makeAgentDir(t, projectRoot, ".cursor")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".git", "info", "exclude"),
+		[]byte(".claude/\n.cursor/\n"), 0o644))
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+
+	got, err := Path("my-app", ".cursor")
+	require.NoError(t, err)
+	require.Equal(t,
+		filepath.Join(centralPath, "projects", "my-app", ".cursor"),
+		got)
+}
+
+func TestPathDirNotTracked(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+
+	_, err = Path("my-app", ".cursor")
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeNotFound, lerr.CodeOf(err))
+	require.Contains(t, err.Error(), ".cursor")
+	require.Contains(t, err.Error(), ".claude",
+		"error must list what IS tracked so the user picks a real dir")
+}
+
+func TestAddBackfillsV1State(t *testing.T) {
+	// land a v1 state file on disk: a tracked project with no
+	// AgentDirs info. Add must backfill from central and proceed.
+	centralPath, projectRoot := addSandbox(t)
+	first, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.NotEmpty(t, first.Dirs)
+
+	// hand-rewrite state to v1 shape to simulate an upgrade-in-place.
+	statePath, err := state.Path()
+	require.NoError(t, err)
+	v1 := "schema_version = 1\n\n[paths]\nmy-app = \"" + projectRoot + "\"\n"
+	require.NoError(t, os.WriteFile(statePath, []byte(v1), 0o644))
+
+	// re-running Add should backfill AgentDirs from central and return
+	// AlreadyTracked without erroring.
+	res, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.True(t, res.AllAlreadyTracked())
+
+	// state on disk is now v2 with the backfilled dir.
+	st, _, err := state.Load()
+	require.NoError(t, err)
+	require.Equal(t, state.CurrentSchemaVersion, st.SchemaVersion)
+	entry, _ := st.ProjectEntryFor("my-app")
+	require.Equal(t, []string{".claude"}, entry.AgentDirs)
+
+	// central HEAD unchanged: backfill is a state-only operation.
+	count, err := git.Run(centralPath, "rev-list", "--count", "HEAD")
+	require.NoError(t, err)
+	require.Equal(t, "2", count, "no new commit from backfill")
 }

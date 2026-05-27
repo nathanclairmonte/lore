@@ -24,65 +24,64 @@ func safetySandbox(t *testing.T) string {
 	return dir
 }
 
-// kinds extracts the Kind set from a violations slice for assertion
-// against ElementsMatch. The Kind is the stable identity of a check;
-// Message wording is allowed to drift.
-func kinds(vs []Violation) []ViolationKind {
-	out := make([]ViolationKind, 0, len(vs))
-	for _, v := range vs {
+// kindsFor extracts the Kind set for a single candidate's violations.
+// Lets tests assert against ElementsMatch without depending on message
+// wording.
+func kindsFor(m map[string][]Violation, name string) []ViolationKind {
+	out := make([]ViolationKind, 0, len(m[name]))
+	for _, v := range m[name] {
 		out = append(out, v.Kind)
 	}
 	return out
 }
 
-func TestCheckSafetyNoViolations(t *testing.T) {
+func TestCheckSafetyAllNoViolations(t *testing.T) {
 	dir := safetySandbox(t)
 	// .claude exists as a real, empty, untracked dir with no nested .git.
-	vs, err := CheckSafety(dir, []string{".claude"})
+	vs, err := CheckSafetyAll(dir, []string{".claude"})
 	require.NoError(t, err)
 	require.Empty(t, vs)
 }
 
-func TestCheckSafetyTrackedFile(t *testing.T) {
+func TestCheckSafetyAllTrackedFile(t *testing.T) {
 	dir := safetySandbox(t)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".claude", "CLAUDE.md"),
 		[]byte("ctx"), 0o644))
 	_, err := git.Run(dir, "add", ".claude/CLAUDE.md")
 	require.NoError(t, err)
 
-	vs, err := CheckSafety(dir, []string{".claude"})
+	vs, err := CheckSafetyAll(dir, []string{".claude"})
 	require.NoError(t, err)
-	require.ElementsMatch(t, []ViolationKind{ViolationTrackedFiles}, kinds(vs))
-	require.Contains(t, vs[0].Message, "git rm --cached -r .claude",
+	require.ElementsMatch(t, []ViolationKind{ViolationTrackedFiles}, kindsFor(vs, ".claude"))
+	require.Contains(t, vs[".claude"][0].Message, "git rm --cached -r .claude",
 		"recovery hint must surface the exact untrack command")
 }
 
-func TestCheckSafetyNestedGit(t *testing.T) {
+func TestCheckSafetyAllNestedGit(t *testing.T) {
 	dir := safetySandbox(t)
 	require.NoError(t, os.Mkdir(filepath.Join(dir, ".claude", ".git"), 0o755))
 
-	vs, err := CheckSafety(dir, []string{".claude"})
+	vs, err := CheckSafetyAll(dir, []string{".claude"})
 	require.NoError(t, err)
-	require.ElementsMatch(t, []ViolationKind{ViolationNestedGit}, kinds(vs))
-	require.Contains(t, vs[0].Message, "nested git repository")
+	require.ElementsMatch(t, []ViolationKind{ViolationNestedGit}, kindsFor(vs, ".claude"))
+	require.Contains(t, vs[".claude"][0].Message, "nested git repository")
 }
 
-func TestCheckSafetyAgentDirSymlink(t *testing.T) {
+func TestCheckSafetyAllAgentDirSymlink(t *testing.T) {
 	dir := safetySandbox(t)
-	// replace the real .claude with a symlink to a different dir.
 	require.NoError(t, os.RemoveAll(filepath.Join(dir, ".claude")))
 	target := filepath.Join(t.TempDir(), "somewhere-else")
 	require.NoError(t, os.Mkdir(target, 0o755))
 	require.NoError(t, os.Symlink(target, filepath.Join(dir, ".claude")))
 
-	vs, err := CheckSafety(dir, []string{".claude"})
+	vs, err := CheckSafetyAll(dir, []string{".claude"})
 	require.NoError(t, err)
-	require.ElementsMatch(t, []ViolationKind{ViolationAgentDirSymlink}, kinds(vs))
-	require.Contains(t, vs[0].Message, target,
+	require.ElementsMatch(t, []ViolationKind{ViolationAgentDirSymlink}, kindsFor(vs, ".claude"))
+	require.Contains(t, vs[".claude"][0].Message, target,
 		"symlink violation must name the target so the user knows what they pointed at")
 }
 
-func TestCheckSafetyAggregatesViolationsForOneCandidate(t *testing.T) {
+func TestCheckSafetyAllAggregatesViolationsForOneCandidate(t *testing.T) {
 	dir := safetySandbox(t)
 	// .claude is a real dir with a tracked file AND a nested .git: both
 	// dir-only checks must fire so the user fixes everything in one
@@ -93,47 +92,32 @@ func TestCheckSafetyAggregatesViolationsForOneCandidate(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.Mkdir(filepath.Join(dir, ".claude", ".git"), 0o755))
 
-	vs, err := CheckSafety(dir, []string{".claude"})
+	vs, err := CheckSafetyAll(dir, []string{".claude"})
 	require.NoError(t, err)
 	require.ElementsMatch(t,
 		[]ViolationKind{ViolationTrackedFiles, ViolationNestedGit},
-		kinds(vs),
+		kindsFor(vs, ".claude"),
 		"all applicable dir-only violations must surface in one pass")
 }
 
-func TestCheckSafetyOnlyChecksFirstManagedCandidate(t *testing.T) {
-	// the key new-design invariant: a clean higher-priority candidate
-	// is what lore will adopt, so a problematic lower-priority candidate
-	// must NOT trigger a refusal - lore would never touch it. otherwise
-	// users with a stale .cursor would be blocked from onboarding a
-	// fresh .claude they actually care about.
+func TestCheckSafetyAllPolicesEachCandidateIndependently(t *testing.T) {
+	// slice 5 invariant: each candidate is policed in isolation. .claude
+	// is clean; .cursor has a nested .git. Multi-dir add should adopt
+	// .claude and skip .cursor with a violation, so per-dir results must
+	// reflect that split rather than the old "first managed candidate"
+	// short-circuit.
 	dir := safetySandbox(t)
-	// .claude is the clean, untracked dir created by safetySandbox.
-	// .cursor has a nested .git (would fire if it were checked).
 	require.NoError(t, os.Mkdir(filepath.Join(dir, ".cursor"), 0o755))
 	require.NoError(t, os.Mkdir(filepath.Join(dir, ".cursor", ".git"), 0o755))
 
-	vs, err := CheckSafety(dir, []string{".claude", ".cursor"})
+	vs, err := CheckSafetyAll(dir, []string{".claude", ".cursor"})
 	require.NoError(t, err)
-	require.Empty(t, vs, "lower-priority candidates must not be probed when a higher-priority one is selected")
+	require.NotContains(t, vs, ".claude", "clean candidate has no map entry")
+	require.ElementsMatch(t, []ViolationKind{ViolationNestedGit}, kindsFor(vs, ".cursor"))
+	require.Equal(t, ".cursor", vs[".cursor"][0].Name)
 }
 
-func TestCheckSafetyFallsThroughToLaterCandidate(t *testing.T) {
-	// when the highest-priority candidate doesn't exist (or is a regular
-	// file, which DetectAgentDir also skips), the next existing one is
-	// the candidate lore would manage, and that's what safety checks.
-	dir := safetySandbox(t)
-	require.NoError(t, os.RemoveAll(filepath.Join(dir, ".claude")))
-	require.NoError(t, os.Mkdir(filepath.Join(dir, ".cursor"), 0o755))
-	require.NoError(t, os.Mkdir(filepath.Join(dir, ".cursor", ".git"), 0o755))
-
-	vs, err := CheckSafety(dir, []string{".claude", ".cursor"})
-	require.NoError(t, err)
-	require.ElementsMatch(t, []ViolationKind{ViolationNestedGit}, kinds(vs))
-	require.Equal(t, ".cursor", vs[0].Name, "violation must point at the candidate actually selected")
-}
-
-func TestCheckSafetySymlinkSkipsNestedAndTrackedChecks(t *testing.T) {
+func TestCheckSafetyAllSymlinkSkipsNestedAndTrackedChecks(t *testing.T) {
 	// a symlinked candidate must not get its target probed for nested
 	// .git or tracked files. otherwise we'd report violations against
 	// the symlink target instead of the candidate the user controls.
@@ -145,29 +129,26 @@ func TestCheckSafetySymlinkSkipsNestedAndTrackedChecks(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(target, ".git"), 0o755))
 	require.NoError(t, os.Symlink(target, filepath.Join(dir, ".claude")))
 
-	vs, err := CheckSafety(dir, []string{".claude"})
+	vs, err := CheckSafetyAll(dir, []string{".claude"})
 	require.NoError(t, err)
-	require.ElementsMatch(t, []ViolationKind{ViolationAgentDirSymlink}, kinds(vs))
+	require.ElementsMatch(t, []ViolationKind{ViolationAgentDirSymlink}, kindsFor(vs, ".claude"))
 }
 
-func TestCheckSafetyIgnoresMissingCandidates(t *testing.T) {
+func TestCheckSafetyAllIgnoresMissingCandidates(t *testing.T) {
 	dir := safetySandbox(t)
-	// .cursor / .agents / .aider don't exist on this project. CheckSafety
-	// must not invent violations for them; only real candidates count.
-	vs, err := CheckSafety(dir, []string{".claude", ".cursor", ".agents", ".aider"})
+	// caller may pass a name that doesn't exist (orchestrator filters
+	// upstream, but defense in depth). No violations, no error.
+	vs, err := CheckSafetyAll(dir, []string{".claude", ".never-there"})
 	require.NoError(t, err)
 	require.Empty(t, vs)
 }
 
-func TestCheckSafetyIgnoresRegularFile(t *testing.T) {
+func TestCheckSafetyAllIgnoresRegularFile(t *testing.T) {
 	dir := safetySandbox(t)
-	// a candidate that's a regular file (not a dir, not a symlink) is
-	// none of CheckSafety's business - DetectAgentDir will already skip
-	// it, and there's nothing to refuse.
 	require.NoError(t, os.RemoveAll(filepath.Join(dir, ".claude")))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".claude"), []byte(""), 0o644))
 
-	vs, err := CheckSafety(dir, []string{".claude"})
+	vs, err := CheckSafetyAll(dir, []string{".claude"})
 	require.NoError(t, err)
 	require.Empty(t, vs)
 }

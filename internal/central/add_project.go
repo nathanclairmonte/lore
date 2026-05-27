@@ -5,57 +5,69 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/git"
 )
 
-// AddProject moves the directory at sourcePath into projects/<name>/<dirName>/
-// inside the central repo and stages it. Returns the absolute destination
-// path along with two closures the orchestrator drives in sequence:
+// AddAgentDir moves the directory at sourcePath into
+// projects/<name>/<dirName>/ inside the central repo and stages it.
+// Returns the absolute destination path along with an undo closure the
+// orchestrator drives on failure:
 //
-//   - commit(msg) runs `git commit -m msg`. Uses the user's real git
-//     identity (no inline -c flags) per ADR 0003.
 //   - undo() reverses the rename, drops the staged path from the index,
-//     and removes the empty projects/<name>/ dir we created. Safe to call
-//     after commit has already run (it skips the git steps if HEAD
-//     advanced past our add).
+//     and removes projects/<name>/ if (and only if) AddAgentDir created
+//     it and no other agent dirs were added to it.
 //
-// Splitting commit and undo lets project.Add fully roll back when a
-// post-rename step (symlink, state-write) fails: we revert the move
-// without a dangling commit on central's history. Commit fires last,
-// only once every other side effect has succeeded.
+// Commits are NOT part of AddAgentDir's contract: a single `lore add`
+// may onboard multiple agent dirs and the orchestrator emits one commit
+// covering them all via Central.Commit once every per-dir side effect
+// has succeeded.
 //
-// Refuses with CodeConflict if projects/<name>/ already exists, since
-// AddProject must never silently merge with an existing tracked project.
-func (c *Central) AddProject(name, dirName, sourcePath string) (
+// Refuses with CodeConflict if projects/<name>/<dirName>/ already exists.
+// A project directory that already contains *other* agent dirs is fine
+// (the slice-5 multi-dir case: `.claude` is tracked, user runs `lore add
+// --dir .cursor` to extend the same project).
+func (c *Central) AddAgentDir(name, dirName, sourcePath string) (
 	destPath string,
-	commit func(msg string) error,
 	undo func() error,
 	err error,
 ) {
 	destProjectDir := filepath.Join(c.Path, "projects", name)
 	destAgentDir := filepath.Join(destProjectDir, dirName)
 
-	if _, statErr := os.Stat(destProjectDir); statErr == nil {
-		return "", nil, nil, lerr.Newf(lerr.CodeConflict,
-			"projects/%s already exists in the central repo", name)
+	if _, statErr := os.Stat(destAgentDir); statErr == nil {
+		return "", nil, lerr.Newf(lerr.CodeConflict,
+			"projects/%s/%s already exists in the central repo", name, dirName)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return "", nil, nil, lerr.Wrap(lerr.CodeGenericError, statErr,
-			fmt.Sprintf("cannot stat %s", destProjectDir))
+		return "", nil, lerr.Wrap(lerr.CodeGenericError, statErr,
+			fmt.Sprintf("cannot stat %s", destAgentDir))
 	}
 
-	if mkErr := os.MkdirAll(destProjectDir, 0o755); mkErr != nil {
-		return "", nil, nil, lerr.Wrap(lerr.CodeGenericError, mkErr,
-			fmt.Sprintf("cannot create %s", destProjectDir))
+	// track whether AddAgentDir created projects/<name>/ so undo only
+	// removes it when we did. extending an existing tracked project (the
+	// second agent dir flow) must leave the original dir alone.
+	createdProjectDir := false
+	if _, statErr := os.Stat(destProjectDir); errors.Is(statErr, os.ErrNotExist) {
+		if mkErr := os.MkdirAll(destProjectDir, 0o755); mkErr != nil {
+			return "", nil, lerr.Wrap(lerr.CodeGenericError, mkErr,
+				fmt.Sprintf("cannot create %s", destProjectDir))
+		}
+		createdProjectDir = true
+	} else if statErr != nil {
+		return "", nil, lerr.Wrap(lerr.CodeGenericError, statErr,
+			fmt.Sprintf("cannot stat %s", destProjectDir))
 	}
 
 	if renameErr := os.Rename(sourcePath, destAgentDir); renameErr != nil {
 		// MkdirAll above may have created destProjectDir; clean it up
-		// so the caller can retry without tripping the "already exists"
-		// branch above.
-		_ = os.Remove(destProjectDir)
-		return "", nil, nil, lerr.Wrap(lerr.CodeGenericError, renameErr,
+		// (when we made it) so the caller can retry without inheriting
+		// the half-built state.
+		if createdProjectDir {
+			_ = os.Remove(destProjectDir)
+		}
+		return "", nil, lerr.Wrap(lerr.CodeGenericError, renameErr,
 			fmt.Sprintf("cannot move %s into central repo", sourcePath))
 	}
 
@@ -72,20 +84,14 @@ func (c *Central) AddProject(name, dirName, sourcePath string) (
 		// of the project dir would destroy user content if rename had
 		// landed under projects/<name>/.
 		if revertErr := os.Rename(destAgentDir, sourcePath); revertErr != nil {
-			// surfacing as a warning here mirrors central.Initialize's
-			// approach: the primary error bubbles, but the user needs to
-			// know they may have to recover manually.
 			fmt.Fprintf(os.Stderr,
 				"warning: failed to revert rename %s -> %s: %v\n",
 				destAgentDir, sourcePath, revertErr)
 		}
-		_ = os.Remove(destProjectDir)
-		return "", nil, nil, addErr
-	}
-
-	commit = func(msg string) error {
-		_, runErr := git.Run(c.Path, "commit", "-m", msg)
-		return runErr
+		if createdProjectDir {
+			_ = os.Remove(destProjectDir)
+		}
+		return "", nil, addErr
 	}
 
 	undo = func() error {
@@ -100,14 +106,26 @@ func (c *Central) AddProject(name, dirName, sourcePath string) (
 			return lerr.Wrap(lerr.CodeGenericError, renameBackErr,
 				fmt.Sprintf("cannot move %s back to %s", destAgentDir, sourcePath))
 		}
-		// best-effort cleanup of the now-empty projects/<name>/ dir. if
-		// the user manually placed something here, leave it; the slice
-		// 19 doctor will surface the orphan.
-		_ = os.Remove(destProjectDir)
+		// only remove projects/<name>/ if we created it for this add AND
+		// it's now empty. extending a tracked project leaves the dir
+		// alone; the slice 19 doctor will surface any orphan from a
+		// partial concurrent run.
+		if createdProjectDir {
+			_ = os.Remove(destProjectDir)
+		}
 		return nil
 	}
 
-	return destAgentDir, commit, undo, nil
+	return destAgentDir, undo, nil
+}
+
+// Commit creates a commit on the central repo with the given message,
+// using the user's real git identity (no inline -c flags) per ADR 0003.
+// Stages must already be set up by prior AddAgentDir / RemoveAgentDir
+// calls.
+func (c *Central) Commit(message string) error {
+	_, err := git.Run(c.Path, "commit", "-m", message)
+	return err
 }
 
 // ProjectPath returns the absolute on-disk location of a tracked agent
@@ -117,19 +135,23 @@ func (c *Central) ProjectPath(name, dirName string) string {
 	return filepath.Join(c.Path, "projects", name, dirName)
 }
 
-// SingleAgentDirName returns the lone agent-directory name tracked under
-// projects/<name>/. Returns CodeNotFound when the project dir is missing
-// or empty, and CodeInconsistency when multiple subdirs are present (the
-// multi-dir case is not yet supported).
-func (c *Central) SingleAgentDirName(name string) (string, error) {
+// ProjectAgentDirs returns the names of every agent directory tracked
+// under projects/<name>/, in deterministic (sorted) order. Returns
+// CodeNotFound when the project dir is missing or empty.
+//
+// The sorted result is the source of truth for "what dirs does this
+// project have?" — state's per-project AgentDirs is a cache populated
+// from this when state was migrated from v1 or when the orchestrator
+// needs to backfill.
+func (c *Central) ProjectAgentDirs(name string) ([]string, error) {
 	projectDir := filepath.Join(c.Path, "projects", name)
 	entries, err := os.ReadDir(projectDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", lerr.Newf(lerr.CodeNotFound,
+			return nil, lerr.Newf(lerr.CodeNotFound,
 				"project %q has no directory in the central repo", name)
 		}
-		return "", lerr.Wrap(lerr.CodeGenericError, err,
+		return nil, lerr.Wrap(lerr.CodeGenericError, err,
 			fmt.Sprintf("cannot read %s", projectDir))
 	}
 	var dirs []string
@@ -138,14 +160,10 @@ func (c *Central) SingleAgentDirName(name string) (string, error) {
 			dirs = append(dirs, e.Name())
 		}
 	}
-	switch len(dirs) {
-	case 0:
-		return "", lerr.Newf(lerr.CodeNotFound,
+	if len(dirs) == 0 {
+		return nil, lerr.Newf(lerr.CodeNotFound,
 			"project %q has no agent directories tracked", name)
-	case 1:
-		return dirs[0], nil
-	default:
-		return "", lerr.Newf(lerr.CodeInconsistency,
-			"project %q has multiple agent dirs tracked; multi-dir support is not wired up yet", name)
 	}
+	sort.Strings(dirs)
+	return dirs, nil
 }
