@@ -185,9 +185,11 @@ func samplePartialAddResult() AddResult {
 				CentralPath: "/home/u/agent-context/projects/my-app/.cursor",
 			},
 			{
-				Name:           ".claude",
-				Status:         StatusSkippedSafety,
-				SafetyMessages: []string{".claude/ contains files tracked by this repo's git."},
+				Name:   ".claude",
+				Status: StatusSkippedSafety,
+				SafetyViolations: []AddSafetyViolation{
+					{Kind: "tracked-files", Message: ".claude/ contains files tracked by this repo's git."},
+				},
 			},
 		},
 	}

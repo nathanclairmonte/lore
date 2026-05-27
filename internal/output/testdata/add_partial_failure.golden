@@ -5,6 +5,7 @@
 
 ⚠ Skipped (safety):
   - .claude/ contains files tracked by this repo's git.
+
 ✓ Committed to central repo: "feat: add my-app"
 
 Next: cd ~/agent-context && git push

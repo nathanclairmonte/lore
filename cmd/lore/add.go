@@ -49,15 +49,18 @@ project with a new agent dir.`,
 func addResultForOutput(r project.AddResult) output.AddResult {
 	dirs := make([]output.AddDirResult, 0, len(r.Dirs))
 	for _, d := range r.Dirs {
-		msgs := make([]string, 0, len(d.Violations))
+		vs := make([]output.AddSafetyViolation, 0, len(d.Violations))
 		for _, v := range d.Violations {
-			msgs = append(msgs, v.Message)
+			vs = append(vs, output.AddSafetyViolation{
+				Kind:    string(v.Kind),
+				Message: v.Message,
+			})
 		}
 		dirs = append(dirs, output.AddDirResult{
-			Name:           d.Name,
-			Status:         output.AddDirStatus(d.Status),
-			CentralPath:    d.CentralPath,
-			SafetyMessages: msgs,
+			Name:             d.Name,
+			Status:           output.AddDirStatus(d.Status),
+			CentralPath:      d.CentralPath,
+			SafetyViolations: vs,
 		})
 	}
 	return output.AddResult{

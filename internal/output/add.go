@@ -17,16 +17,26 @@ const (
 	StatusSkippedSafety  AddDirStatus = "skipped-safety"
 )
 
+// AddSafetyViolation mirrors detect.Violation in shape (Kind + Message)
+// so this package can carry the violation kind through to slice 21's
+// typed JSON envelope without importing detect. The human renderer only
+// uses Message today; Kind is preserved for the structured output path.
+type AddSafetyViolation struct {
+	Kind    string
+	Message string
+}
+
 // AddDirResult is the per-dir outcome inside an AddResult. Mirrors the
 // shape of project.AgentDirResult.
 type AddDirResult struct {
 	Name        string
 	Status      AddDirStatus
 	CentralPath string
-	// SafetyMessage is the joined-bullet safety violation text. Already
-	// formatted by the orchestrator so this package doesn't have to know
-	// the detect.Violation shape.
-	SafetyMessages []string
+	// SafetyViolations carries one entry per safety-gate failure. Populated
+	// only for StatusSkippedSafety. The slice (not a pre-joined string)
+	// lets the JSON path emit structured violation kinds while the human
+	// path still iterates Message lines.
+	SafetyViolations []AddSafetyViolation
 }
 
 // AddResult is the data lore add hands to the output layer.
@@ -114,12 +124,16 @@ func PrintAddResult(r AddResult) {
 			Warn("Skipped (safety):")
 		}
 		skippedCount++
-		for _, msg := range d.SafetyMessages {
-			_, _ = fmt.Fprintf(Out, "  - %s\n", msg)
+		for _, v := range d.SafetyViolations {
+			_, _ = fmt.Fprintf(Out, "  - %s\n", v.Message)
 		}
 	}
 
 	if addedCount > 0 {
+		// blank separates the skipped block from the commit line.
+		if skippedCount > 0 {
+			Blank()
+		}
 		Success("Committed to central repo: %q", r.CommitMessage)
 		Blank()
 		path := shellQuoteForCD(config.Contract(r.CentralRepo), r.CentralRepo)
