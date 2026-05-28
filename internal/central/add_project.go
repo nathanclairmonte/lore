@@ -128,6 +128,18 @@ func (c *Central) Commit(message string) error {
 	return err
 }
 
+// CommitPaths commits only the staged changes under the given repo-relative
+// pathspecs, leaving any unrelated staged content in central untouched. mv
+// uses this so a rename can't fold a user's pre-staged work elsewhere in
+// central into the rename commit. Pass both the old and new project paths so
+// git records the delete-at-old and add-at-new sides of the rename. Uses the
+// real git identity per ADR 0003, same as Commit.
+func (c *Central) CommitPaths(message string, paths ...string) error {
+	args := append([]string{"commit", "-m", message, "--"}, paths...)
+	_, err := git.Run(c.Path, args...)
+	return err
+}
+
 // ProjectPath returns the absolute on-disk location of a tracked agent
 // directory inside the central repo. Pure path computation; does not
 // check that the path exists.

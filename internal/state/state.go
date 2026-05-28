@@ -6,6 +6,7 @@ package state
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -125,6 +126,20 @@ func (s *State) PathFor(name string) (string, bool) {
 		return "", false
 	}
 	return e.Path, true
+}
+
+// Clone returns a copy of s safe to mutate independently. Projects is a map
+// (reference type), so a plain struct copy would alias it; orchestrators
+// that snapshot pre-mutation state for a rollback (lore rm / mv) need this.
+// Per-entry AgentDirs slices are shared, which is safe because callers
+// replace whole entries rather than mutating a slice in place.
+func (s *State) Clone() State {
+	out := State{
+		SchemaVersion: s.SchemaVersion,
+		Projects:      make(map[string]ProjectEntry, len(s.Projects)),
+	}
+	maps.Copy(out.Projects, s.Projects)
+	return out
 }
 
 // AddAgentDir records (name, projectPath, dirName) on the in-memory
