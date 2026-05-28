@@ -15,6 +15,7 @@ const (
 	StatusAdded          AddDirStatus = "added"
 	StatusAlreadyTracked AddDirStatus = "already-tracked"
 	StatusSkippedSafety  AddDirStatus = "skipped-safety"
+	StatusScaffolded     AddDirStatus = "scaffolded"
 )
 
 // AddSafetyViolation mirrors detect.Violation in shape (Kind + Message)
@@ -46,6 +47,9 @@ type AddResult struct {
 	CentralRepo   string
 	CommitMessage string
 	Dirs          []AddDirResult
+	// ScaffoldRequested mirrors the orchestrator's flag: true when the
+	// user passed --create, even when no scaffolding actually happened.
+	ScaffoldRequested bool
 }
 
 // allAlreadyTracked reports whether every per-dir result has
@@ -101,7 +105,13 @@ func PrintAddResult(r AddResult) {
 	addedCount := 0
 	for _, d := range r.Dirs {
 		switch d.Status {
-		case StatusAdded:
+		case StatusAdded, StatusScaffolded:
+			// scaffolded dirs go through the same onboard flow once
+			// they're written to disk, so the Moved/Linked block is
+			// identical. The "Scaffolded ... with empty ..." line was
+			// already printed by the orchestrator at scaffold time so
+			// the user sees the create event in real time alongside the
+			// gitignore picker writes.
 			addedCount++
 			_, _ = fmt.Fprintf(Out, "%s Moved  %s  %s  %s\n",
 				pathStyle.Render(g.arrowRight), d.Name,

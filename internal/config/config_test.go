@@ -44,7 +44,7 @@ func TestDefaultsExpandsPaths(t *testing.T) {
 	for _, root := range cfg.ProjectsRoots {
 		require.False(t, strings.HasPrefix(root, "~"), "ProjectsRoots should be expanded: %q", root)
 	}
-	require.Equal(t, []string{".claude", ".agents", ".cursor", ".aider"}, cfg.AgentDirs)
+	require.Equal(t, []string{".agents", ".claude", ".codex", ".cursor"}, cfg.AgentDirs)
 	require.True(t, cfg.Commit.Auto)
 	require.False(t, cfg.Sync.AutoPush)
 }
@@ -102,7 +102,7 @@ func TestLoadAppliesDefaultsForMissingKeys(t *testing.T) {
 	require.True(t, exists)
 	require.Equal(t, filepath.Join(home, "custom-loc"), cfg.CentralRepo)
 	// defaults preserved for other fields.
-	require.Equal(t, []string{".claude", ".agents", ".cursor", ".aider"}, cfg.AgentDirs)
+	require.Equal(t, []string{".agents", ".claude", ".codex", ".cursor"}, cfg.AgentDirs)
 	require.True(t, cfg.Commit.Auto)
 	require.Equal(t, 2, cfg.ProjectsDepth)
 }
