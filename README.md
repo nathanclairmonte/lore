@@ -8,10 +8,7 @@ intended design.
 
 ## Supported platforms
 
-Linux and macOS. Windows is not supported natively; use WSL. See
-[ADR 0001](.claude/adr/0001-linux-and-macos-only.md) for the reasoning
-(POSIX symlinks are core to lore's mechanism and the Windows equivalents
-have meaningfully different traversal semantics).
+Linux and macOS. Windows is not supported natively; use WSL.
 
 ## Install
 
