@@ -12,8 +12,10 @@ import (
 // scaffoldOther is the sentinel selection value returned by the picker
 // when the user wants to type a free-text name instead of choosing one
 // of the offered options. The caller spots this and drops to the input
-// step.
-const scaffoldOther = ""
+// step. The literal is namespaced so it can't collide with a real
+// agent-dir name a user might one day configure (e.g. an empty entry in
+// agent_dirs would silently match a bare "" sentinel).
+const scaffoldOther = "__lore_scaffold_other__"
 
 // scaffoldSelectRunner is a var so tests can stub the select form
 // without driving huh through a real terminal.
