@@ -14,158 +14,136 @@ import (
 	"github.com/nathanclairmonte/lore/internal/state"
 )
 
-// RmPreflight is the result of the pre-flight check Remove runs before
-// any side effect. cmd/lore/rm.go uses it to render the confirmation
-// prompt (the user sees exactly what will happen, including any
-// pre-detected drift refusals, before saying y/N).
+// RmPlan is what PreflightRm produces and Remove consumes. The exported
+// fields are what cmd/lore/rm.go reads to render the confirmation
+// prompt; the unexported fields carry the loaded environment so Remove
+// doesn't have to re-load config / state / central. cmd interacts with
+// the plan only through its exported surface.
 //
-// If RefusalErr is non-nil, Remove will refuse with that error if
-// invoked; the cmd layer surfaces the refusal at prompt time so the
-// user doesn't type y to a request that was always going to fail.
-type RmPreflight struct {
+// If RefusalErr is non-nil, Remove will refuse with the same error.
+// Per-dir refusal reasons live in Dirs entries with status
+// UnlinkStatusRefused so the prompt can show every problematic dir at
+// once.
+type RmPlan struct {
 	ProjectName  string
-	ProjectPath  string // empty when AlreadyUnlinked is true
+	ProjectPath  string // empty when the project isn't tracked locally
 	CentralRepo  string
 	Dirs         []UnlinkDirResult
 	CommitMsg    string
-	RecoveryCmd  string // materialised `git checkout HEAD~1 -- projects/<name>/` command
-	RefusalErr   error  // non-nil when a drift gate would refuse before the rm landed
+	RecoveryCmd  string // materialised recovery command
+	RefusalErr   error  // joined per-dir refusals, nil when none
 	NotInCentral bool   // project missing from central too: cmd layer treats as not-found
+
+	cfg       config.Config
+	st        state.State
+	origState state.State
+	central   *central.Central
 }
 
 // RmResult is the structured outcome of a Remove. cmd/lore/rm.go
 // converts it to the output package's render type.
 type RmResult struct {
 	ProjectName   string
-	ProjectPath   string // empty when AlreadyUnlinked is true
+	ProjectPath   string
 	CentralRepo   string
 	CommitMessage string
 	Dirs          []UnlinkDirResult
 	RecoveryCmd   string
 }
 
-// PreflightRm runs the read-only portion of Remove: validates the
-// project exists, runs the unlink drift gates, and computes the
-// materialised commit + recovery commands. Returns enough context for
-// the cmd layer to render the confirmation prompt.
+// PreflightRm runs the read-only portion of Remove: loads the
+// environment, validates the project exists, classifies every tracked
+// dir's drift state, and computes the materialised commit + recovery
+// commands. The returned RmPlan carries everything Remove needs, so
+// Remove never re-loads.
 //
-// Pre-flight does not mutate state or disk. If a drift refusal fires,
-// RefusalErr is populated and the cmd layer surfaces it in the prompt
-// before the y/N step; Remove will refuse with the same error if
-// invoked.
-func PreflightRm(name string) (RmPreflight, error) {
+// Does not mutate state or disk. When a drift gate would refuse,
+// RefusalErr is populated and per-dir verdicts land in Dirs.
+func PreflightRm(name string) (RmPlan, error) {
 	cfg, _, err := config.Load()
 	if err != nil {
-		return RmPreflight{}, err
+		return RmPlan{}, err
 	}
 
 	st, _, err := state.Load()
 	if err != nil {
-		return RmPreflight{}, err
+		return RmPlan{}, err
 	}
 
 	c, err := central.Open(cfg.CentralRepo)
 	if err != nil {
 		if lerr.CodeOf(err) == lerr.CodeNotFound {
-			return RmPreflight{}, lerr.Newf(lerr.CodeSetupMissing,
+			return RmPlan{}, lerr.Newf(lerr.CodeSetupMissing,
 				"central repo not found at %s", config.Contract(cfg.CentralRepo)).
 				WithHint("run `lore init` first")
 		}
-		return RmPreflight{}, err
+		return RmPlan{}, err
 	}
 
-	pre := RmPreflight{
-		ProjectName: name,
-		CentralRepo: c.Path,
-		CommitMsg:   renderRmTemplate(cfg.Commit.RmTemplate, name),
-		RecoveryCmd: rmRecoveryCommand(c.Path, name),
-	}
-
-	entry, tracked := st.ProjectEntryFor(name)
-	if tracked {
-		pre.ProjectPath = entry.Path
-	}
-
-	// not in state AND not in central → cmd layer surfaces a clean
-	// not-found instead of letting RemoveProjectStaged fail later.
-	if !tracked {
-		if _, statErr := os.Stat(c.ProjectPath(name, "")); statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				pre.NotInCentral = true
-				return pre, nil
-			}
-			return RmPreflight{}, lerr.Wrap(lerr.CodeGenericError, statErr,
-				fmt.Sprintf("cannot stat %s", c.ProjectPath(name, "")))
-		}
-		// in central but not in state: nothing to unlink, just show the
-		// central removal in the prompt.
-		return pre, nil
-	}
-
-	// dry-run the unlink classification by walking the same drift gates
-	// the actual unlinkProject helper does. construct a synthetic per-
-	// dir verdict list for the prompt. on a refusal, capture the error
-	// in RefusalErr without aborting the prompt path: the cmd layer
-	// renders the refusal alongside the rest of the planned actions so
-	// the user sees the full picture before saying y/N.
-	dirs, refusal := previewUnlinkDirs(c, entry.Path, name, entry.AgentDirs)
-	pre.Dirs = dirs
-	pre.RefusalErr = refusal
-	return pre, nil
-}
-
-// Remove stops tracking name entirely. Calls unlinkProject to clean up
-// symlinks + scrub local state, then `git rm -r projects/<name>/` in
-// central, commits using commit.rm_template, and saves state. The
-// commit is the success boundary; any failure before it unwinds every
-// side effect via LIFO rollbacks (symlinks recreated, central index
-// restored from HEAD, state entry put back).
-//
-// Confirmation lives in the cmd layer: this orchestrator just runs
-// the destructive sequence. cmd/lore/rm.go calls PreflightRm first,
-// renders the prompt, gets a y/N, then calls Remove when y.
-//
-// Drift refusals (CodeRefusedSafety) from the underlying unlinkProject
-// abort before any central or state mutation. The cmd layer surfaces
-// them in the confirmation prompt so the user sees the refusal before
-// pressing y.
-func Remove(name string) (RmResult, error) {
-	cfg, _, err := config.Load()
-	if err != nil {
-		return RmResult{}, err
-	}
-
-	st, _, err := state.Load()
-	if err != nil {
-		return RmResult{}, err
-	}
-
-	c, err := central.Open(cfg.CentralRepo)
-	if err != nil {
-		if lerr.CodeOf(err) == lerr.CodeNotFound {
-			return RmResult{}, lerr.Newf(lerr.CodeSetupMissing,
-				"central repo not found at %s", config.Contract(cfg.CentralRepo)).
-				WithHint("run `lore init` first")
-		}
-		return RmResult{}, err
-	}
-
-	// snapshot pre-mutation state for the post-Save rollback. without
-	// this, the rollback's state.Save would re-write the mutated st
-	// (project deleted) because the LIFO drain runs the Save rollback
-	// before unlinkProject's in-memory restore. State.Projects is a
-	// map reference type so a shallow copy of State isn't sufficient;
-	// we copy the map entries explicitly. ProjectEntry's AgentDirs
-	// slice isn't mutated by the rm path (we delete entries, never
-	// edit slice contents), so a per-entry shallow copy is safe.
+	// snapshot pre-mutation state so Remove's post-Save rollback can
+	// restore it. State.Projects is a map (reference type), so a
+	// shallow State copy isn't enough; copy the entries.
 	origState := state.State{
 		SchemaVersion: st.SchemaVersion,
 		Projects:      make(map[string]state.ProjectEntry, len(st.Projects)),
 	}
 	maps.Copy(origState.Projects, st.Projects)
 
-	// success-gated unwind. mirrors Add and Unlink: LIFO drain of
-	// rollbacks on failure, success boundary at the final Commit.
+	plan := RmPlan{
+		ProjectName: name,
+		CentralRepo: c.Path,
+		CommitMsg:   renderRmTemplate(cfg.Commit.RmTemplate, name),
+		RecoveryCmd: rmRecoveryCommand(c.Path, name),
+
+		cfg:       cfg,
+		st:        st,
+		origState: origState,
+		central:   c,
+	}
+
+	entry, tracked := st.ProjectEntryFor(name)
+	if tracked {
+		plan.ProjectPath = entry.Path
+	}
+
+	if !tracked {
+		// not in state and not in central → surface a clean not-found
+		// before letting RemoveProjectStaged fail later.
+		if _, statErr := os.Stat(c.ProjectPath(name, "")); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				plan.NotInCentral = true
+				return plan, nil
+			}
+			return RmPlan{}, lerr.Wrap(lerr.CodeGenericError, statErr,
+				fmt.Sprintf("cannot stat %s", c.ProjectPath(name, "")))
+		}
+		// in central but not in state: nothing to unlink, just show the
+		// central removal in the prompt.
+		return plan, nil
+	}
+
+	dirs, refusal := previewUnlinkDirs(c, entry.Path, name, entry.AgentDirs)
+	plan.Dirs = dirs
+	plan.RefusalErr = refusal
+	return plan, nil
+}
+
+// Remove stops tracking the project named in plan. Calls unlinkProject
+// to clean up symlinks and scrub local state in memory, then `git rm
+// -r projects/<name>/` in central, commits using plan.CommitMsg, and
+// saves state. The commit is the success boundary; any failure before
+// it unwinds every side effect via LIFO rollbacks.
+//
+// Confirmation lives in the cmd layer: this orchestrator runs the
+// destructive sequence on a plan it trusts. cmd/lore/rm.go calls
+// PreflightRm, renders the prompt, gets a y/N, then calls Remove.
+func Remove(plan RmPlan) (RmResult, error) {
+	// destructure the plan's execution environment. plan.st gets
+	// mutated by unlinkProject; plan.origState is the snapshot used
+	// by the post-Save rollback to restore disk state.
+	cfg, st, c, origState := plan.cfg, plan.st, plan.central, plan.origState
+	name := plan.ProjectName
+
 	success := false
 	var rollbacks []func()
 	defer func() {
@@ -177,19 +155,12 @@ func Remove(name string) (RmResult, error) {
 		}
 	}()
 
-	// step 1: unlink symlinks + scrub state in memory. drift refusals
-	// surface here as CodeRefusedSafety; the project may be tracked
-	// only in central (AlreadyUnlinked=true) which is fine.
 	helperRollbacks, unlinkRes, err := unlinkProject(&st, c, name)
 	rollbacks = append(rollbacks, helperRollbacks...)
 	if err != nil {
 		return RmResult{}, err
 	}
 
-	// step 2: remove the central project dir via git rm. the dir may be
-	// missing too (e.g. a stale local-state record where central was
-	// already cleaned elsewhere): surface as CodeNotFound so the user
-	// sees the standard not-found exit code.
 	undo, err := c.RemoveProjectStaged(name)
 	if err != nil {
 		return RmResult{}, err
@@ -200,10 +171,9 @@ func Remove(name string) (RmResult, error) {
 		}
 	})
 
-	// step 3: persist state mutations (the project entry was deleted
-	// in-memory by unlinkProject; this writes the new shape to disk).
-	// the rollback writes origState (the pre-mutation snapshot), NOT
-	// the current st: at rollback time st still holds the mutated map
+	// persist the state mutation unlinkProject made in-memory. the
+	// rollback writes origState (the pre-mutation snapshot), not the
+	// current st: at rollback time st still holds the mutated map
 	// because LIFO drain runs this rollback before unlinkProject's
 	// in-memory restore closure fires.
 	if err := state.Save(st); err != nil {
@@ -215,9 +185,12 @@ func Remove(name string) (RmResult, error) {
 		}
 	})
 
-	// step 4: commit. this is the success boundary. on success, no
-	// rollback fires; on failure, every step above unwinds in reverse.
-	commitMessage := renderRmTemplate(cfg.Commit.RmTemplate, name)
+	// success boundary. on success no rollback fires; on failure every
+	// step above unwinds in reverse.
+	commitMessage := plan.CommitMsg
+	if commitMessage == "" {
+		commitMessage = renderRmTemplate(cfg.Commit.RmTemplate, name)
+	}
 	if err := c.Commit(commitMessage); err != nil {
 		return RmResult{}, err
 	}
@@ -229,17 +202,15 @@ func Remove(name string) (RmResult, error) {
 		CentralRepo:   c.Path,
 		CommitMessage: commitMessage,
 		Dirs:          unlinkRes.Dirs,
-		RecoveryCmd:   rmRecoveryCommand(c.Path, name),
+		RecoveryCmd:   plan.RecoveryCmd,
 	}, nil
 }
 
-// renderRmTemplate expands {project} in commit.rm_template. Mirrors
-// renderAddTemplate; kept separate so the default fallback below
-// reflects the rm-specific shape rather than the generic "feat: add".
+// renderRmTemplate expands {project} in commit.rm_template. The empty-
+// template case is handled by config defaulting (the embedded default
+// config supplies "chore: remove {project}"); the renderer assumes a
+// non-empty template.
 func renderRmTemplate(tmpl, projectName string) string {
-	if tmpl == "" {
-		tmpl = "chore: remove {project}"
-	}
 	return strings.ReplaceAll(tmpl, "{project}", projectName)
 }
 
@@ -253,22 +224,29 @@ func rmRecoveryCommand(centralPath, projectName string) string {
 }
 
 // previewUnlinkDirs runs the same drift classification as the
-// unlinkProject helper but without mutating state or removing
-// anything. Used by PreflightRm to build the per-dir verdict list
-// shown in the confirmation prompt. On a drift-B or drift-C refusal
-// returns the error in the second slot so the cmd layer can surface
-// it in the prompt before the y/N step.
+// unlinkProject helper but without mutating state or removing anything.
+// Used by PreflightRm to build the per-dir verdict list shown in the
+// confirmation prompt. Aggregates every refusal so the prompt can show
+// every problematic dir in one pass.
 //
 // Shares classifyAgentDirDrift with unlinkProject so the prompt's
 // verdict can't drift from what the actual run would do.
 func previewUnlinkDirs(c *central.Central, projectPath, name string, dirs []string) ([]UnlinkDirResult, error) {
 	out := make([]UnlinkDirResult, 0, len(dirs))
+	var refusals []error
 	for _, dirName := range dirs {
 		linkPath := filepath.Join(projectPath, dirName)
 		expected := c.ProjectPath(name, dirName)
-		status, err := classifyAgentDirDrift(linkPath, expected)
-		if err != nil {
-			return out, err
+		status, classifyErr := classifyAgentDirDrift(linkPath, expected)
+		if classifyErr != nil {
+			out = append(out, UnlinkDirResult{
+				Name:     dirName,
+				Status:   UnlinkStatusRefused,
+				LinkPath: linkPath,
+				Err:      classifyErr,
+			})
+			refusals = append(refusals, classifyErr)
+			continue
 		}
 		out = append(out, UnlinkDirResult{
 			Name:     dirName,
@@ -276,6 +254,8 @@ func previewUnlinkDirs(c *central.Central, projectPath, name string, dirs []stri
 			LinkPath: linkPath,
 		})
 	}
+	if len(refusals) > 0 {
+		return out, errors.Join(refusals...)
+	}
 	return out, nil
 }
-

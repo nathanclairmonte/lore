@@ -7,16 +7,16 @@ import (
 )
 
 // RmConfirmationView is the data PrintRmConfirmation renders for the
-// pre-confirm prompt. cmd/lore/rm.go constructs it from project.RmPreflight,
+// pre-confirm prompt. cmd/lore/rm.go constructs it from project.RmPlan,
 // then calls this to render before invoking prompt.Confirm.
 type RmConfirmationView struct {
 	ProjectName  string
-	ProjectPath  string // empty when AlreadyUnlinked
+	ProjectPath  string // empty when the project isn't tracked locally
 	CentralRepo  string
 	CommitMsg    string
 	RecoveryCmd  string
 	Dirs         []UnlinkDirResult
-	RefusalNote  string // non-empty when a drift gate would refuse before the rm landed
+	RefusalNote  string // joined per-dir refusal reasons; empty when none
 	NotInCentral bool
 }
 
@@ -34,8 +34,8 @@ type RmResult struct {
 // PrintRmConfirmation renders the prompt body the user reads before
 // the y/N step. Lists every symlink that will be removed explicitly
 // (no collapse) so the user can spot a typo-target before saying y.
-// Surfaces any drift-refusal upstream so the user sees the refusal
-// before pressing y, not after.
+// When any dir would refuse, renders that dir as a REFUSE line so the
+// user sees every problematic dir before pressing y.
 //
 // Suppressed in JSON mode (JSON runs are non-interactive and shouldn't
 // reach the prompt path anyway).
@@ -54,6 +54,13 @@ func PrintRmConfirmation(v RmConfirmationView) {
 		case UnlinkStatusAlreadyUnlinked:
 			_, _ = fmt.Fprintf(Out, "  - Note: %s is already absent on disk\n",
 				config.Contract(d.LinkPath))
+		case UnlinkStatusRefused:
+			reason := "drift refusal"
+			if d.Err != nil {
+				reason = d.Err.Error()
+			}
+			_, _ = fmt.Fprintf(Out, "  - REFUSE: %s — %s\n",
+				config.Contract(d.LinkPath), reason)
 		}
 	}
 	if v.ProjectPath != "" {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/git"
@@ -24,15 +25,15 @@ import (
 // boundary, same as AddAgentDir + Commit.
 //
 // Refuses with CodeNotFound if projects/<name>/ does not exist in the
-// central repo working tree. lore rm catches this and surfaces it as
-// "project not tracked in central" before any other side effects fire.
+// central repo working tree. Refuses with CodeRefusedSafety if the
+// project directory has uncommitted modifications in central's working
+// tree, so a `git rm` doesn't silently destroy local edits.
 func (c *Central) RemoveProjectStaged(name string) (undo func() error, err error) {
 	relPath := filepath.Join("projects", name)
 	absPath := filepath.Join(c.Path, relPath)
 
-	// pre-flight: refuse cleanly when the project dir is missing in
-	// central, so the orchestrator can surface CodeNotFound rather than
-	// letting git rm fail with a less specific exit-6 git error.
+	// surface a clean CodeNotFound when the project dir is missing
+	// rather than letting git rm fail with a less specific error.
 	if _, statErr := os.Stat(absPath); statErr != nil {
 		if errors.Is(statErr, os.ErrNotExist) {
 			return nil, lerr.Newf(lerr.CodeNotFound,
@@ -40,6 +41,21 @@ func (c *Central) RemoveProjectStaged(name string) (undo func() error, err error
 		}
 		return nil, lerr.Wrap(lerr.CodeGenericError, statErr,
 			fmt.Sprintf("cannot stat %s", absPath))
+	}
+
+	// refuse if anything under projects/<name>/ has uncommitted
+	// changes (modified, added, deleted, untracked). git rm would
+	// either fail noisily or silently destroy the edits depending on
+	// the case; we'd rather hand the user back control to commit /
+	// stash / discard before re-running.
+	status, statusErr := git.Run(c.Path, "status", "--porcelain", "--", relPath)
+	if statusErr != nil {
+		return nil, statusErr
+	}
+	if strings.TrimSpace(status) != "" {
+		return nil, lerr.Newf(lerr.CodeRefusedSafety,
+			"uncommitted changes under projects/%s/ in %s", name, c.Path).
+			WithHint("commit, stash, or discard the changes in central, then re-run `lore rm`")
 	}
 
 	if _, rmErr := git.Run(c.Path, "rm", "-r", "--quiet", relPath); rmErr != nil {

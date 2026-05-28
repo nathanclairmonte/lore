@@ -53,7 +53,7 @@ func TestLoreRm_NonTTYWithoutForceExits5(t *testing.T) {
 	postAddCmdSandbox(t)
 
 	// in `go test` stdin is not a TTY. without --force, rm must
-	// refuse with exit 5 BEFORE any side effect. (decision Q7)
+	// refuse with exit 5 BEFORE any side effect.
 	require.Equal(t, 5, run([]string{"rm", "my-app"}),
 		"non-TTY without --force must exit 5 (refused for safety)")
 }
@@ -171,4 +171,70 @@ func TestLoreRm_RemovesAfterUnlink(t *testing.T) {
 
 	require.NoDirExists(t,
 		filepath.Join(home, "agent-context", "projects", "my-app"))
+}
+
+func TestLoreRm_DirtyCentralRefusesExit5(t *testing.T) {
+	home, projectRoot := postAddCmdSandbox(t)
+
+	// touch a file inside the central project dir so git status sees
+	// uncommitted modifications. rm must refuse before running git rm,
+	// so nothing on the local side moves either.
+	dirty := filepath.Join(home, "agent-context", "projects", "my-app", ".claude", "CLAUDE.md")
+	require.NoError(t, os.WriteFile(dirty, []byte("edited locally"), 0o644))
+
+	require.Equal(t, 5, run([]string{"rm", "--force", "my-app"}),
+		"dirty central must refuse with exit 5 before any side effect")
+
+	// local symlink still in place; state untouched; central edit still
+	// present so the user can choose what to do with it.
+	info, err := os.Lstat(filepath.Join(projectRoot, ".claude"))
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSymlink,
+		".claude symlink must still exist after dirty refusal")
+	stateBytes, _ := os.ReadFile(filepath.Join(home, ".local/state", "lore", "state.toml"))
+	require.Contains(t, string(stateBytes), "my-app")
+	got, err := os.ReadFile(dirty)
+	require.NoError(t, err)
+	require.Equal(t, "edited locally", string(got),
+		"central-side edit must survive the refusal untouched")
+}
+
+func TestLoreRm_CommitFailureRollsBackEverything(t *testing.T) {
+	// install a failing pre-commit hook in central so c.Commit fails
+	// AFTER the destructive sequence already landed (symlink removed,
+	// central staged, state saved). the LIFO drain must restore every
+	// side effect: state file rewritten with the original entry,
+	// central project dir checked back out from HEAD, symlink recreated.
+	home, projectRoot := postAddCmdSandbox(t)
+
+	hooksDir := filepath.Join(home, "agent-context", ".git", "hooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
+	hookPath := filepath.Join(hooksDir, "pre-commit")
+	require.NoError(t, os.WriteFile(hookPath,
+		[]byte("#!/bin/sh\necho 'blocking commit for test' >&2\nexit 1\n"), 0o755))
+
+	require.NotEqual(t, 0, run([]string{"rm", "--force", "my-app"}),
+		"commit failure must propagate as a nonzero exit")
+
+	// rollback assertions: every side effect undone.
+
+	// symlink restored.
+	info, err := os.Lstat(filepath.Join(projectRoot, ".claude"))
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSymlink,
+		"rollback must recreate the symlink")
+
+	// state still has my-app.
+	stateBytes, _ := os.ReadFile(filepath.Join(home, ".local/state", "lore", "state.toml"))
+	require.Contains(t, string(stateBytes), "my-app",
+		"rollback must restore state.toml entry")
+
+	// central project dir still present (git checkout HEAD restored it).
+	require.DirExists(t,
+		filepath.Join(home, "agent-context", "projects", "my-app"),
+		"rollback must restore central project dir from HEAD")
+	got, err := os.ReadFile(filepath.Join(home, "agent-context", "projects/my-app/.claude/CLAUDE.md"))
+	require.NoError(t, err)
+	require.Equal(t, "context", string(got),
+		"restored content must match original")
 }

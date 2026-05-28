@@ -87,7 +87,7 @@ func TestLoreUnlink_DriftBRealDirectoryRefuses(t *testing.T) {
 		"drift B (real directory at link path) must exit 5")
 
 	// state untouched — refusal leaves the entry intact for the user
-	// to investigate (decision Q3b).
+	// to investigate.
 	stateBytes, _ := os.ReadFile(filepath.Join(home, ".local/state", "lore", "state.toml"))
 	require.Contains(t, string(stateBytes), "my-app",
 		"refusal must leave state.toml entry intact")
@@ -114,8 +114,7 @@ func TestLoreUnlink_DriftCWrongTargetRefuses(t *testing.T) {
 func TestLoreUnlink_MultiDirHappyPath(t *testing.T) {
 	home, projectRoot := postAddCmdSandbox(t)
 
-	// extend with a second agent dir. matches slice 5's "extend a
-	// tracked project" flow.
+	// extend with a second agent dir to cover the multi-dir flow.
 	require.NoError(t, os.Mkdir(filepath.Join(projectRoot, ".cursor"), 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(projectRoot, ".cursor", "rules.md"),
@@ -151,11 +150,10 @@ func TestLoreUnlink_MultiDirPartialFailureRollsBack(t *testing.T) {
 		[]byte(".claude/\n.cursor/\n"), 0o644))
 	require.Equal(t, 0, run([]string{"add", "--dir", ".cursor", projectRoot}))
 
-	// pre-flight will see .claude is a valid symlink and .cursor is
-	// drift B (real dir). decision Q1: refuse the whole project,
-	// don't remove .claude. since refusal happens at pre-flight (no
-	// side effect), no actual rollback fires — but the contract is the
-	// same: state and disk untouched.
+	// pre-flight sees .claude as a valid symlink and .cursor as
+	// drift B (real dir): refuse the whole project, don't remove
+	// .claude. Refusal happens at pre-flight (no side effect), so no
+	// rollback fires — the contract is just: state and disk untouched.
 	cursorPath := filepath.Join(projectRoot, ".cursor")
 	require.NoError(t, os.Remove(cursorPath))
 	require.NoError(t, os.MkdirAll(cursorPath, 0o755))
@@ -168,6 +166,39 @@ func TestLoreUnlink_MultiDirPartialFailureRollsBack(t *testing.T) {
 	require.NoError(t, err)
 	require.NotZero(t, info.Mode()&os.ModeSymlink,
 		".claude symlink must still exist after multi-dir refusal")
+}
+
+func TestLoreUnlink_MultiDirAggregatesRefusals(t *testing.T) {
+	// when two dirs each have a drift problem, the renderer must
+	// surface BOTH in a single run rather than dripping them out
+	// across repeat invocations.
+	_, projectRoot := postAddCmdSandbox(t)
+
+	require.NoError(t, os.Mkdir(filepath.Join(projectRoot, ".cursor"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".cursor", "rules.md"),
+		[]byte("rules"), 0o644))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".git", "info", "exclude"),
+		[]byte(".claude/\n.cursor/\n"), 0o644))
+	require.Equal(t, 0, run([]string{"add", "--dir", ".cursor", projectRoot}))
+
+	// drift B on both .claude and .cursor: replace each symlink with
+	// a real directory.
+	for _, name := range []string{".claude", ".cursor"} {
+		p := filepath.Join(projectRoot, name)
+		require.NoError(t, os.Remove(p))
+		require.NoError(t, os.MkdirAll(p, 0o755))
+	}
+
+	buf := capturedOut(t)
+	require.Equal(t, 5, run([]string{"unlink", "my-app"}))
+
+	got := buf.String()
+	require.Contains(t, got, ".claude",
+		"output must mention the .claude refusal")
+	require.Contains(t, got, ".cursor",
+		"output must mention the .cursor refusal — aggregation, not first-only")
 }
 
 func TestLoreUnlink_All(t *testing.T) {
@@ -230,7 +261,7 @@ func TestLoreUnlink_AllContinuesPastRefusal(t *testing.T) {
 	// second-app still got unlinked.
 	_, err = os.Lstat(filepath.Join(secondRoot, ".claude"))
 	require.True(t, os.IsNotExist(err),
-		"--all must continue past per-project refusal (Q4a)")
+		"--all must continue past per-project refusal")
 
 	// my-app's state untouched (refusal preserves bookkeeping).
 	stateBytes, _ := os.ReadFile(filepath.Join(home, ".local/state", "lore", "state.toml"))

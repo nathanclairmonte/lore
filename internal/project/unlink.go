@@ -26,13 +26,21 @@ const (
 	// the bookkeeping converges; the renderer surfaces a warning line so
 	// the user sees the drift was observed, not silently ignored.
 	UnlinkStatusAlreadyUnlinked UnlinkDirStatus = "already-unlinked"
+	// UnlinkStatusRefused is set when classifying the dir surfaced a
+	// safety refusal (drift B: real dir/file; drift C: symlink to an
+	// unexpected target). The per-dir Err carries the specific reason
+	// so the renderer can show every refused dir at once rather than
+	// stopping at the first.
+	UnlinkStatusRefused UnlinkDirStatus = "refused"
 )
 
 // UnlinkDirResult is the per-dir outcome inside an UnlinkResult.
+// Err is populated only when Status is UnlinkStatusRefused.
 type UnlinkDirResult struct {
 	Name     string
 	Status   UnlinkDirStatus
 	LinkPath string // absolute path where the symlink lived (or was supposed to)
+	Err      error
 }
 
 // UnlinkResult is the structured outcome of an Unlink. cmd/lore/unlink.go
@@ -73,14 +81,17 @@ type UnlinkAllResult struct {
 // returns UnlinkResult{AlreadyUnlinked: true} with nil error so scripts
 // can re-run unlinks without checking first.
 //
-// Refusals (CodeRefusedSafety, exit 5):
+// Refusals (CodeRefusedSafety, exit 5) come from per-dir drift gates:
 //   - drift B: a real directory or regular file sits at a tracked
 //     symlink's recorded path
 //   - drift C: a symlink at the recorded path points somewhere other
 //     than the expected projects/<name>/<dir>/
 //
-// Both refusals leave both disk and state untouched so the user can
-// investigate (slice 19's `lore doctor` is the eventual home).
+// Both refusals leave disk and state untouched so the user can
+// investigate. When multiple dirs refuse, every refused dir's reason is
+// returned in the per-dir Dirs entries (alongside its UnlinkStatusRefused
+// status), and the returned error is the joined set of refusals so the
+// caller can render the full picture in one pass.
 //
 // Partial-failure rollback: on a multi-agent-dir project, removing one
 // symlink can succeed and a later step (e.g. a transient I/O error)
@@ -108,10 +119,9 @@ func Unlink(name string) (UnlinkResult, error) {
 		return UnlinkResult{}, err
 	}
 
-	// success-gated unwind mirrors the slice 6 Add pattern: rollback
-	// closures appended LIFO, drained on any failure before state.Save
-	// lands. state.Save is the success boundary for Unlink (no central
-	// commit happens here).
+	// success-gated unwind: rollback closures appended LIFO, drained on
+	// any failure before state.Save lands. state.Save is the success
+	// boundary for Unlink (no central commit happens here).
 	success := false
 	var rollbacks []func()
 	defer func() {
@@ -126,7 +136,9 @@ func Unlink(name string) (UnlinkResult, error) {
 	helperRollbacks, result, err := unlinkProject(&st, c, name)
 	rollbacks = append(rollbacks, helperRollbacks...)
 	if err != nil {
-		return UnlinkResult{}, err
+		// return the partial result so the caller can render every
+		// refused dir, not just the first.
+		return result, err
 	}
 
 	if result.AlreadyUnlinked {
@@ -186,11 +198,17 @@ func UnlinkAll() (UnlinkAllResult, error) {
 			UnlinkResult: res,
 			Err:          err,
 		})
-		if err != nil && worst == nil {
-			// hold onto the first per-project error so the cmd layer
-			// can propagate its exit code. additional refusals are
-			// surfaced via the per-project verdicts in the rendered
-			// output; only one exit code can win.
+		if err == nil {
+			continue
+		}
+		// promote CodeRefusedSafety over other codes so scripts see the
+		// safety refusal regardless of iteration order. other classes
+		// (setup, generic) only outrank a still-nil worst.
+		if worst == nil {
+			worst = err
+			continue
+		}
+		if lerr.CodeOf(err) == lerr.CodeRefusedSafety && lerr.CodeOf(worst) != lerr.CodeRefusedSafety {
 			worst = err
 		}
 	}
@@ -198,18 +216,19 @@ func UnlinkAll() (UnlinkAllResult, error) {
 }
 
 // unlinkProject is the shared internal helper for Unlink and Remove.
-// Pre-flight-classifies each tracked dir into a per-dir verdict,
-// refuses with CodeRefusedSafety if any dir hits drift case B/C, then
-// removes each symlink in order, mutates st in memory to drop the
-// project entry, and returns LIFO rollback closures.
+// Classifies every tracked dir into a per-dir verdict, and if any dir
+// hit a safety refusal (drift B/C) returns the joined refusal error
+// alongside a fully-populated result so the caller can render every
+// refused dir at once. Otherwise removes each symlink, mutates st in
+// memory to drop the project entry, and returns LIFO rollback closures.
 //
 // Does NOT call state.Save. Callers own the Save (and the central
 // commit, for Remove) at their own success boundary.
 //
 // When st has no entry for name, returns AlreadyUnlinked=true with no
-// rollbacks and no error. Both Unlink (idempotent re-run) and Remove
-// (project may exist in central without local-state record after an
-// earlier unlink) rely on this.
+// rollbacks and no error. Unlink (idempotent re-run) and Remove
+// (project may exist in central without a local-state record after an
+// earlier unlink) both rely on that.
 func unlinkProject(st *state.State, c *central.Central, name string) (
 	rollbacks []func(),
 	result UnlinkResult,
@@ -226,24 +245,33 @@ func unlinkProject(st *state.State, c *central.Central, name string) (
 	result.ProjectName = name
 	result.ProjectPath = entry.Path
 
-	// pre-flight: classify each tracked dir's drift state via the
-	// shared classifyAgentDirDrift helper. drift A (silently missing)
-	// proceeds with the already-unlinked verdict; B (real dir or file)
-	// and C (symlink pointing somewhere unexpected) refuse the whole
-	// run before any filesystem side effect.
+	// classify every dir up front. drift A → already-unlinked; B/C →
+	// refused with the specific reason attached. we keep going past a
+	// refusal so the prompt / output can show every problematic dir in
+	// one pass instead of dripping them out across repeat runs.
 	type dirPlan struct {
 		name           string
 		linkPath       string
 		expectedTarget string
 		status         UnlinkDirStatus
+		refusal        error
 	}
 	plans := make([]dirPlan, 0, len(entry.AgentDirs))
+	var refusals []error
 	for _, dirName := range entry.AgentDirs {
 		linkPath := filepath.Join(entry.Path, dirName)
 		expected := c.ProjectPath(name, dirName)
 		status, classifyErr := classifyAgentDirDrift(linkPath, expected)
 		if classifyErr != nil {
-			return nil, UnlinkResult{}, classifyErr
+			plans = append(plans, dirPlan{
+				name:           dirName,
+				linkPath:       linkPath,
+				expectedTarget: expected,
+				status:         UnlinkStatusRefused,
+				refusal:        classifyErr,
+			})
+			refusals = append(refusals, classifyErr)
+			continue
 		}
 		plans = append(plans, dirPlan{
 			name:           dirName,
@@ -253,10 +281,24 @@ func unlinkProject(st *state.State, c *central.Central, name string) (
 		})
 	}
 
+	// any refusal aborts before any filesystem side effect. populate
+	// result.Dirs with every per-dir verdict so the renderer can show
+	// the full picture.
+	if len(refusals) > 0 {
+		for _, p := range plans {
+			result.Dirs = append(result.Dirs, UnlinkDirResult{
+				Name:     p.name,
+				Status:   p.status,
+				LinkPath: p.linkPath,
+				Err:      p.refusal,
+			})
+		}
+		return nil, result, errors.Join(refusals...)
+	}
+
 	// execute: remove each symlink (skipping drift-A dirs that already
 	// have nothing on disk), append a recreate rollback after each
-	// success. drift-A dirs register no rollback because there's
-	// nothing to put back.
+	// success.
 	for _, p := range plans {
 		if p.status == UnlinkStatusUnlinked {
 			if rmErr := link.Remove(p.linkPath); rmErr != nil {
@@ -278,11 +320,9 @@ func unlinkProject(st *state.State, c *central.Central, name string) (
 		})
 	}
 
-	// state mutation: drop the entire project entry from local state.
-	// unlink's contract is "the project stays in central but is no
-	// longer linked on this machine", so the local-state record goes
-	// away entirely. capture the original entry for rollback before
-	// mutating.
+	// drop the entire project entry from local state. unlink's contract
+	// is "the project stays in central but is no longer linked on this
+	// machine"; the local-state record goes away entirely.
 	origEntry := entry
 	delete(st.Projects, name)
 	rollbacks = append(rollbacks, func() {

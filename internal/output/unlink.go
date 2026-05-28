@@ -7,21 +7,23 @@ import (
 )
 
 // UnlinkDirStatus mirrors project.UnlinkDirStatus so this package
-// doesn't import project. The dependency only ever points one way:
-// cmd/lore/unlink.go converts the orchestrator's verdicts into this
-// shape.
+// doesn't import project. cmd/lore/unlink.go translates the
+// orchestrator's verdicts into this shape.
 type UnlinkDirStatus string
 
 const (
 	UnlinkStatusUnlinked        UnlinkDirStatus = "unlinked"
 	UnlinkStatusAlreadyUnlinked UnlinkDirStatus = "already-unlinked"
+	UnlinkStatusRefused         UnlinkDirStatus = "refused"
 )
 
-// UnlinkDirResult mirrors project.UnlinkDirResult.
+// UnlinkDirResult mirrors project.UnlinkDirResult. Err is populated
+// only when Status is UnlinkStatusRefused.
 type UnlinkDirResult struct {
 	Name     string
 	Status   UnlinkDirStatus
 	LinkPath string
+	Err      error
 }
 
 // UnlinkResult is the data lore unlink hands to the output layer.
@@ -33,7 +35,7 @@ type UnlinkResult struct {
 }
 
 // PrintUnlinkResult renders the per-dir verdicts of a single-project
-// unlink. Three variants:
+// unlink. Variants:
 //
 //   - AlreadyUnlinked: terse "Project X was already unlinked" line so
 //     idempotent re-runs stay quiet.
@@ -42,6 +44,8 @@ type UnlinkResult struct {
 //   - Mixed dirs (some unlinked, some drift-A "already-unlinked"): the
 //     drift-A lines render as warn lines so the user sees the drift
 //     was observed and bookkeeping was scrubbed regardless.
+//   - One or more refused dirs: header plus a per-dir REFUSE line for
+//     each one so the user sees every problematic dir at once.
 //
 // Suppressed in JSON mode.
 func PrintUnlinkResult(r UnlinkResult) {
@@ -67,6 +71,12 @@ func PrintUnlinkResult(r UnlinkResult) {
 		case UnlinkStatusAlreadyUnlinked:
 			Warn("Drift: %s was not present on disk (state scrubbed anyway)",
 				config.Contract(d.LinkPath))
+		case UnlinkStatusRefused:
+			reason := "drift refusal"
+			if d.Err != nil {
+				reason = d.Err.Error()
+			}
+			Warn("Refused: %s — %s", config.Contract(d.LinkPath), reason)
 		}
 	}
 }

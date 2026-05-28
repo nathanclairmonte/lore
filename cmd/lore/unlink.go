@@ -22,12 +22,13 @@ this machine's bookkeeping changes.
 Refuses to touch anything at the recorded path that isn't a
 lore-created symlink (exit 5 with a clear message), so a real
 directory or a manually-repointed symlink is never destroyed
-by accident.
+by accident. When multiple dirs would refuse, every refused
+dir is reported in one run.
 
 Use --all to unlink every tracked project on this machine in
 one go. Per-project refusals don't abort the loop; the run
 reports the verdict for each project and exits with the worst
-code seen.`,
+code seen (CodeRefusedSafety wins over other codes).`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if all && len(args) > 0 {
@@ -42,17 +43,17 @@ code seen.`,
 
 			if all {
 				res, err := project.UnlinkAll()
-				if len(res.Projects) > 0 {
-					output.PrintUnlinkAllResult(unlinkAllResultForOutput(res))
-				}
+				// always render; the output layer owns the empty-state
+				// message ("no tracked projects on this machine").
+				output.PrintUnlinkAllResult(unlinkAllResultForOutput(res))
 				return err
 			}
 
 			res, err := project.Unlink(args[0])
-			// only render when the orchestrator produced something
-			// meaningful: a refusal returns the zero-value result, and
-			// printing its empty header is misleading. mirror the slice 6
-			// add.go gate.
+			// render whenever the orchestrator produced a meaningful
+			// result. with per-dir refusal aggregation, a refused run
+			// still returns a populated result (Dirs carries the
+			// reasons), so this gate now passes on refusals too.
 			if res.ProjectName != "" || res.AlreadyUnlinked {
 				output.PrintUnlinkResult(unlinkResultForOutput(res))
 			}
@@ -75,6 +76,7 @@ func unlinkDirsForOutput(in []project.UnlinkDirResult) []output.UnlinkDirResult 
 			Name:     d.Name,
 			Status:   output.UnlinkDirStatus(d.Status),
 			LinkPath: d.LinkPath,
+			Err:      d.Err,
 		})
 	}
 	return out
