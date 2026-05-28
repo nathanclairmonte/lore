@@ -96,7 +96,7 @@ type MoveResult struct {
 // The central commit is the success boundary; any failure before it
 // unwinds every side effect via LIFO rollbacks (symlinks restored to their
 // old targets, state reverted, the git mv reversed).
-func Move(old, new, newPath string) (MoveResult, error) {
+func Move(old, newName, newPath string) (MoveResult, error) {
 	cfg, _, err := config.Load()
 	if err != nil {
 		return MoveResult{}, err
@@ -119,34 +119,43 @@ func Move(old, new, newPath string) (MoveResult, error) {
 
 	// --- Phase 1: validation, no side effects -------------------------
 
-	if old == new {
+	// validate both names before the same-name and existence checks, so a
+	// malformed name reports as such rather than being masked. old is
+	// validated too: a tracked project always has a valid name, so this
+	// can only reject input that could never have matched central anyway.
+	if err := ValidateProjectName(old, "<old>"); err != nil {
+		return MoveResult{}, err
+	}
+	if err := ValidateProjectName(newName, "<new>"); err != nil {
+		return MoveResult{}, err
+	}
+	if old == newName {
 		return MoveResult{}, lerr.Newf(lerr.CodeConflict,
 			"project is already named %q", old)
 	}
-	if err := ValidateProjectName(new, "<new>"); err != nil {
-		return MoveResult{}, err
-	}
 
-	// central-authoritative existence + conflict.
+	// central-authoritative existence + conflict. wording here mirrors
+	// RenameProjectStaged's own gate so the user sees consistent copy
+	// regardless of which layer's check fires first.
 	oldExists, err := centralProjectDirExists(c, old)
 	if err != nil {
 		return MoveResult{}, err
 	}
 	if !oldExists {
 		return MoveResult{}, lerr.Newf(lerr.CodeNotFound,
-			"projects/%s does not exist in central", old)
+			"projects/%s does not exist in the central repo", old)
 	}
-	newExists, err := centralProjectDirExists(c, new)
+	newExists, err := centralProjectDirExists(c, newName)
 	if err != nil {
 		return MoveResult{}, err
 	}
 	if newExists {
 		return MoveResult{}, lerr.Newf(lerr.CodeConflict,
-			"projects/%s already exists in central", new).
+			"projects/%s already exists in the central repo", newName).
 			WithHint("choose a different name")
 	}
 
-	commitMessage := renderMvTemplate(cfg.Commit.MvTemplate, old, new)
+	commitMessage := renderMvTemplate(cfg.Commit.MvTemplate, old, newName)
 
 	// snapshot pre-mutation state so the post-Save rollback can restore it.
 	origState := st.Clone()
@@ -204,7 +213,7 @@ func Move(old, new, newPath string) (MoveResult, error) {
 			oldLink := filepath.Join(entry.Path, dirName)
 			newLink := filepath.Join(dstPath, dirName)
 			oldExpected := c.ProjectPath(old, dirName)
-			newExpected := c.ProjectPath(new, dirName)
+			newExpected := c.ProjectPath(newName, dirName)
 			status, classifyErr := classifyAgentDirDrift(oldLink, oldExpected)
 
 			p := movePlan{
@@ -277,32 +286,50 @@ func Move(old, new, newPath string) (MoveResult, error) {
 	// --- success-gated unwind region ----------------------------------
 
 	success := false
-	var rollbacks []func()
+	var rollbacks []func() error
 	defer func() {
 		if success {
 			return
 		}
+		// drain LIFO. each closure logs its own specific failure; we count
+		// them so a partial rollback ends with one prominent line telling
+		// the user the rename is half-applied and what to inspect, rather
+		// than leaving them to piece it together from scattered warnings.
+		failed := 0
 		for i := len(rollbacks) - 1; i >= 0; i-- {
-			rollbacks[i]()
+			if rbErr := rollbacks[i](); rbErr != nil {
+				failed++
+			}
+		}
+		if failed > 0 {
+			where := "central at " + config.Contract(c.Path)
+			if linkedHere {
+				where += " and the symlinks under " + config.Contract(entry.Path)
+			}
+			fmt.Fprintf(os.Stderr,
+				"warning: %d rollback step(s) failed; the rename may be half-applied. "+
+					"inspect %s before re-running `lore mv`.\n", failed, where)
 		}
 	}()
 
 	// --- Phase 2: central rename (first side effect) ------------------
 	// the dirty-central gate lives inside RenameProjectStaged and fires here,
 	// still before the commit.
-	undo, err := c.RenameProjectStaged(old, new)
+	undo, err := c.RenameProjectStaged(old, newName)
 	if err != nil {
 		return MoveResult{}, err
 	}
-	rollbacks = append(rollbacks, func() {
+	rollbacks = append(rollbacks, func() error {
 		if undoErr := undo(); undoErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: %v\n", undoErr)
+			return undoErr
 		}
+		return nil
 	})
 
 	result := MoveResult{
 		OldName:       old,
-		ProjectName:   new,
+		ProjectName:   newName,
 		CentralRepo:   c.Path,
 		CommitMessage: commitMessage,
 	}
@@ -328,24 +355,28 @@ func Move(old, new, newPath string) (MoveResult, error) {
 					return MoveResult{}, rmErr
 				}
 				oldLink, oldExpected := p.oldLink, p.oldExpected
-				rollbacks = append(rollbacks, func() {
+				rollbacks = append(rollbacks, func() error {
 					if e := link.Create(oldExpected, oldLink); e != nil {
 						fmt.Fprintf(os.Stderr,
 							"warning: cannot recreate symlink at %s during rollback: %v\n",
 							oldLink, e)
+						return e
 					}
+					return nil
 				})
 			}
 			if crErr := link.Create(p.newExpected, p.newLink); crErr != nil {
 				return MoveResult{}, crErr
 			}
 			newLink := p.newLink
-			rollbacks = append(rollbacks, func() {
+			rollbacks = append(rollbacks, func() error {
 				if e := link.Remove(newLink); e != nil {
 					fmt.Fprintf(os.Stderr,
 						"warning: cannot remove symlink at %s during rollback: %v\n",
 						newLink, e)
+					return e
 				}
+				return nil
 			})
 			result.Dirs = append(result.Dirs, MoveDirResult{
 				Name: p.name, Status: p.status, OldLink: p.oldLink, NewLink: p.newLink, Note: p.note,
@@ -361,13 +392,14 @@ func Move(old, new, newPath string) (MoveResult, error) {
 			movedEntry.Path = dstPath
 		}
 		delete(st.Projects, old)
-		st.Projects[new] = movedEntry
-		rollbacks = append(rollbacks, func() {
-			delete(st.Projects, new)
+		st.Projects[newName] = movedEntry
+		rollbacks = append(rollbacks, func() error {
+			delete(st.Projects, newName)
 			if st.Projects == nil {
 				st.Projects = map[string]state.ProjectEntry{}
 			}
 			st.Projects[old] = entry
+			return nil
 		})
 
 		// --- Phase 3.6: persist state BEFORE the commit -----------------
@@ -377,15 +409,22 @@ func Move(old, new, newPath string) (MoveResult, error) {
 		if err := state.Save(st); err != nil {
 			return MoveResult{}, err
 		}
-		rollbacks = append(rollbacks, func() {
+		rollbacks = append(rollbacks, func() error {
 			if saveErr := state.Save(origState); saveErr != nil {
 				fmt.Fprintf(os.Stderr, "warning: cannot revert state file: %v\n", saveErr)
+				return saveErr
 			}
+			return nil
 		})
 	}
 
 	// --- Phase 4: commit (success boundary) ---------------------------
-	if err := c.Commit(commitMessage); err != nil {
+	// scope the commit to the two project paths so a rename can never fold
+	// unrelated staged content elsewhere in central into the rename commit.
+	// both sides need naming: the delete at projects/<old> and the add at
+	// projects/<new>.
+	if err := c.CommitPaths(commitMessage,
+		filepath.Join("projects", old), filepath.Join("projects", newName)); err != nil {
 		return MoveResult{}, err
 	}
 	success = true
@@ -393,12 +432,21 @@ func Move(old, new, newPath string) (MoveResult, error) {
 	return result, nil
 }
 
-// renderMvTemplate expands {old} and {new} in commit.mv_template. The
-// empty-template case is handled by config defaulting (the embedded
-// default supplies "refactor: rename {old} to {new}"); the renderer
-// assumes a non-empty template.
-func renderMvTemplate(tmpl, old, new string) string {
+// defaultMvTemplate is the fallback commit message when commit.mv_template
+// is missing or explicitly blanked. Kept in sync with default_config.toml.
+const defaultMvTemplate = "refactor: rename {old} to {new}"
+
+// renderMvTemplate expands {old} and {new} in commit.mv_template. Config
+// defaulting fills a missing key with the embedded default, but a user can
+// still set mv_template to an empty string. Rather than hand git an empty
+// commit message (which would fail only after every side effect is staged,
+// forcing a needless rollback), fall back to the built-in default when the
+// template is blank.
+func renderMvTemplate(tmpl, old, newName string) string {
+	if strings.TrimSpace(tmpl) == "" {
+		tmpl = defaultMvTemplate
+	}
 	out := strings.ReplaceAll(tmpl, "{old}", old)
-	out = strings.ReplaceAll(out, "{new}", new)
+	out = strings.ReplaceAll(out, "{new}", newName)
 	return out
 }

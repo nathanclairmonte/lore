@@ -31,9 +31,9 @@ import (
 // reverse-git-mv undo can't cleanly account for staged edits or
 // untracked files, so we hand control back to commit / stash / discard
 // first).
-func (c *Central) RenameProjectStaged(old, new string) (undo func() error, err error) {
+func (c *Central) RenameProjectStaged(old, newName string) (undo func() error, err error) {
 	oldRel := filepath.Join("projects", old)
-	newRel := filepath.Join("projects", new)
+	newRel := filepath.Join("projects", newName)
 	oldAbs := filepath.Join(c.Path, oldRel)
 	newAbs := filepath.Join(c.Path, newRel)
 
@@ -53,7 +53,7 @@ func (c *Central) RenameProjectStaged(old, new string) (undo func() error, err e
 	// is the honest answer.
 	if _, statErr := os.Stat(newAbs); statErr == nil {
 		return nil, lerr.Newf(lerr.CodeConflict,
-			"projects/%s already exists in the central repo", new)
+			"projects/%s already exists in the central repo", newName)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return nil, lerr.Wrap(lerr.CodeGenericError, statErr,
 			fmt.Sprintf("cannot stat %s", newAbs))

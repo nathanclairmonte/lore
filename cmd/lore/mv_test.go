@@ -328,3 +328,81 @@ func TestLoreMv_CommitFailureRollsBackEverything(t *testing.T) {
 	require.Contains(t, st, "[projects.my-app]")
 	require.NotContains(t, st, "[projects.bar]")
 }
+
+func TestLoreMv_PathModeMissingDirExits3(t *testing.T) {
+	home, projectRoot := postAddCmdSandbox(t)
+
+	// --path at a directory that doesn't exist: lore plants a symlink inside
+	// the new path, it never creates the user's project tree, so this refuses
+	// with CodeNotFound (exit 3) before any side effect.
+	missing := filepath.Join(home, "code", "does-not-exist")
+	require.Equal(t, 3, run([]string{"mv", "my-app", "bar", "--path", missing}))
+
+	// all-or-nothing: central not renamed, old symlink intact.
+	require.DirExists(t, filepath.Join(centralDir(home), "projects", "my-app"))
+	require.NoDirExists(t, filepath.Join(centralDir(home), "projects", "bar"))
+	info, err := os.Lstat(filepath.Join(projectRoot, ".claude"))
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSymlink)
+}
+
+func TestLoreMv_PathModeNotADirExits5(t *testing.T) {
+	home, _ := postAddCmdSandbox(t)
+
+	// --path pointing at a regular file: refuse with CodeRefusedSafety (5).
+	file := filepath.Join(home, "code", "a-file")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
+
+	require.Equal(t, 5, run([]string{"mv", "my-app", "bar", "--path", file}))
+
+	require.DirExists(t, filepath.Join(centralDir(home), "projects", "my-app"))
+	require.NoDirExists(t, filepath.Join(centralDir(home), "projects", "bar"))
+}
+
+func TestLoreMv_PathModeMultiAgentDir(t *testing.T) {
+	home, projectRoot := postAddCmdSandbox(t)
+	addCmdSecondDir(t, projectRoot)
+
+	newPath := filepath.Join(home, "code", "bar")
+	require.NoError(t, os.MkdirAll(newPath, 0o755))
+
+	require.Equal(t, 0, run([]string{"mv", "my-app", "bar", "--path", newPath}))
+
+	for _, dir := range []string{".claude", ".cursor"} {
+		// every old-path symlink removed.
+		_, err := os.Lstat(filepath.Join(projectRoot, dir))
+		require.True(t, os.IsNotExist(err), "old-path symlink must be removed: "+dir)
+		// every new-path symlink repoints to projects/bar/<dir>.
+		target, err := os.Readlink(filepath.Join(newPath, dir))
+		require.NoError(t, err)
+		require.Equal(t,
+			filepath.Join(centralDir(home), "projects", "bar", dir), target,
+			"every relocated symlink must point at projects/bar")
+	}
+	require.Contains(t, readState(t, home), filepath.Join("code", "bar"))
+}
+
+func TestLoreMv_DoesNotSweepUnrelatedStagedChanges(t *testing.T) {
+	home, _ := postAddCmdSandbox(t)
+
+	// stage an unrelated file in central, outside projects/my-app. the
+	// scoped commit must not fold it into the rename commit.
+	stray := filepath.Join(centralDir(home), "STRAY.md")
+	require.NoError(t, os.WriteFile(stray, []byte("unrelated"), 0o644))
+	_, err := git.Run(centralDir(home), "add", "STRAY.md")
+	require.NoError(t, err)
+
+	require.Equal(t, 0, run([]string{"mv", "my-app", "bar"}))
+
+	// the HEAD commit touches only the project paths, never STRAY.md.
+	files, err := git.Run(centralDir(home), "show", "--name-only", "--pretty=format:", "HEAD")
+	require.NoError(t, err)
+	require.NotContains(t, files, "STRAY.md",
+		"unrelated staged file must not ride the rename commit")
+	require.Contains(t, files, filepath.Join("projects", "bar"))
+
+	// STRAY.md is still staged, waiting for its own commit.
+	status, err := git.Run(centralDir(home), "status", "--porcelain", "--", "STRAY.md")
+	require.NoError(t, err)
+	require.Contains(t, status, "STRAY.md")
+}
