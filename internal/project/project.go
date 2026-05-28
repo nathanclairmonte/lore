@@ -813,12 +813,9 @@ func ignorePatternFor(target prompt.GitignoreTarget, name, projectPath, repoTop 
 }
 
 // renderAddTemplate expands {project} and {dirs} in commit.add_template.
-// {dirs} is comma-joined. Other planned variables ({date}, {hostname})
-// land with the slices that consume them.
+// {dirs} is comma-joined. Config defaulting supplies the template when
+// the user hasn't set one; the renderer assumes a non-empty template.
 func renderAddTemplate(tmpl, projectName string, dirNames []string) string {
-	if tmpl == "" {
-		tmpl = "feat: add {project}"
-	}
 	out := strings.ReplaceAll(tmpl, "{project}", projectName)
 	out = strings.ReplaceAll(out, "{dirs}", strings.Join(dirNames, ", "))
 	return out
