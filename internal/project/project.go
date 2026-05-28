@@ -145,7 +145,7 @@ func Add(opts AddOptions) (AddResult, error) {
 		// a conflict the orchestrator can't silently resolve. Catch it
 		// before any per-dir work so the user sees the cleanest error.
 		return AddResult{}, lerr.Newf(lerr.CodeConflict,
-			"project %q is already tracked at %s — use --name <alternative> to track this project under a different name",
+			"project %q is already tracked at %s; use --name <alternative> to track this project under a different name",
 			projectName, config.Contract(trackedEntry.Path))
 	}
 
@@ -162,10 +162,30 @@ func Add(opts AddOptions) (AddResult, error) {
 		}
 		if orphan {
 			return AddResult{}, lerr.Newf(lerr.CodeConflict,
-				"name %q already exists in central but isn't tracked on this machine — use --name <alternative>, or run `lore use %s` to adopt it",
+				"name %q already exists in central but isn't tracked on this machine; use --name <alternative>, or run `lore use %s` to adopt it",
 				projectName, projectName)
 		}
 	}
+
+	// success-gated unwind covering every per-dir side effect this run
+	// produces. each step registers its own undo closure; on failure the
+	// list is drained LIFO so unwind order is the reverse of side-effect
+	// order. central, link, state are reverted; the commit at the end is
+	// the success boundary. Scoped here (rather than later in the
+	// function) so the --create scaffold step below can also register
+	// rollbacks: a fresh scaffold should be removed if any subsequent
+	// step (gitignore picker dismissal, safety refusal, central write
+	// failure) aborts the run.
+	success := false
+	var rollbacks []func()
+	defer func() {
+		if success {
+			return
+		}
+		for i := len(rollbacks) - 1; i >= 0; i-- {
+			rollbacks[i]()
+		}
+	}()
 
 	// --create pre-step: scaffold requested agent dirs (if any are
 	// missing) before DetectAgentDirs runs. Detection then finds the
@@ -173,7 +193,10 @@ func Add(opts AddOptions) (AddResult, error) {
 	// downstream selection/safety/picker/onboard flow is unchanged.
 	// Errors here (target exists as a file, picker dismissal in
 	// interactive mode, permission denied) abort BEFORE any central or
-	// state writes happen.
+	// state writes happen. Successful scaffolds register a rollback that
+	// removes the freshly-created dir on any later failure: a partial
+	// multi-dir scaffold rolls back earlier dirs, and a downstream
+	// picker dismissal rolls back the scaffold that just landed.
 	scaffoldedSet := map[string]bool{}
 	if opts.Create {
 		choices, err := scaffoldChoicesFromOptions(opts.Dirs, cfg.AgentDirs)
@@ -187,6 +210,18 @@ func Add(opts AddOptions) (AddResult, error) {
 			}
 			if created {
 				scaffoldedSet[choice.DirName] = true
+				scaffoldedPath := filepath.Join(projectPath, choice.DirName)
+				rollbacks = append(rollbacks, func() {
+					// RemoveAll because the dir contains the starter file
+					// we wrote; safe because we know exactly what we put
+					// there and the rollback window is the same goroutine
+					// with no concurrent writers.
+					if rmErr := os.RemoveAll(scaffoldedPath); rmErr != nil {
+						fmt.Fprintf(os.Stderr,
+							"warning: cannot remove scaffolded %s during rollback: %v\n",
+							scaffoldedPath, rmErr)
+					}
+				})
 				output.Success("Scaffolded %s/ with empty %s", choice.DirName, choice.FileName)
 			} else {
 				output.Hint("%s already exists; skipping scaffold", choice.DirName)
@@ -347,24 +382,11 @@ func Add(opts AddOptions) (AddResult, error) {
 		output.Success("added %s to %s", pattern, config.Contract(targetPath))
 	}
 
-	// success-gated unwind covering every per-dir side effect this run
-	// produced. each step registers its own undo closure; on failure the
-	// list is drained LIFO so unwind order is the reverse of side-effect
-	// order. central, link, state are reverted; the commit at the end is
-	// the success boundary.
+	// per-dir onboard. each successful step appends an undo closure to
+	// the rollbacks slice declared earlier (above the --create step);
+	// the deferred drain runs them LIFO on any failure before this
+	// function returns.
 	addedDirs := make([]AgentDirResult, 0, len(toOnboard))
-	var rollbacks []func()
-
-	success := false
-	defer func() {
-		if success {
-			return
-		}
-		for i := len(rollbacks) - 1; i >= 0; i-- {
-			rollbacks[i]()
-		}
-	}()
-
 	for _, d := range toOnboard {
 		destPath, undo, err := c.AddAgentDir(projectName, d.Name, d.Path)
 		if err != nil {
@@ -565,8 +587,13 @@ func resolveSelection(requested []string, detected []detect.AgentDir, tracked, s
 // centralProjectDirExists reports whether central/projects/<name>/ is
 // present on disk. The orchestrator uses this to surface a collision
 // when --name (or the basename-derived name) would land into a central
-// project the local state doesn't know about - typically a fresh
-// machine pointed at an existing central repo, or a state-file wipe.
+// project the local state doesn't know about, typically a fresh machine
+// pointed at an existing central repo or a state-file wipe.
+//
+// Returns CodeInconsistency if the path exists but isn't a directory.
+// That shouldn't happen in a lore-managed central repo, but surfacing
+// it clearly here beats letting central.AddAgentDir fail with a less
+// obvious error a few steps later.
 func centralProjectDirExists(c *central.Central, name string) (bool, error) {
 	path := c.ProjectPath(name, "")
 	// ProjectPath joins projects/<name>/"" → projects/<name> (trailing
@@ -580,7 +607,12 @@ func centralProjectDirExists(c *central.Central, name string) (bool, error) {
 		return false, lerr.Wrap(lerr.CodeGenericError, err,
 			fmt.Sprintf("cannot stat %s", path))
 	}
-	return info.IsDir(), nil
+	if !info.IsDir() {
+		return false, lerr.Newf(lerr.CodeInconsistency,
+			"%s exists but is not a directory; central layout is corrupted", path).
+			WithHint("remove or rename the file at that path, or use --name <alternative>")
+	}
+	return true, nil
 }
 
 // untrackedSymlinkCandidates returns candidate names from cfg.AgentDirs

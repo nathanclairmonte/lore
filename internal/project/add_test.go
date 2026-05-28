@@ -1102,6 +1102,59 @@ func TestAddRejectsInvalidName(t *testing.T) {
 	}
 }
 
+func TestAddCreateRollbackOnPickerDismissal(t *testing.T) {
+	// when --create scaffolds a fresh agent dir and a subsequent step
+	// fails (here: gitignore picker bails because there's no TTY and
+	// the freshly-scaffolded dir isn't ignored yet), the scaffold
+	// rollback must remove the dir so the user isn't left with a
+	// half-onboarded stub.
+	_, projectRoot := addSandbox(t)
+	require.NoError(t, os.RemoveAll(filepath.Join(projectRoot, ".claude")))
+	// NO stubPicker: real gitignore picker fires and fails the isTTY
+	// gate. That's the failure path whose rollback we're exercising.
+
+	_, err := Add(AddOptions{
+		ProjectPath: projectRoot,
+		Dirs:        []string{".codex"},
+		Create:      true,
+	})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeInconsistency, lerr.CodeOf(err))
+
+	// scaffold rollback fired: the dir we just created is gone.
+	require.NoDirExists(t, filepath.Join(projectRoot, ".codex"),
+		"scaffolded dir must be removed when a later step fails")
+}
+
+func TestAddCreateRollbackOnMultiDirPartialFailure(t *testing.T) {
+	// --create --dir A --dir B where A scaffolds cleanly but B fails
+	// (a regular file is sitting at B's name, which scaffoldAgentDir
+	// refuses) must roll back A. Without the rollback the user is left
+	// with a stray empty A on disk from a failed run.
+	_, projectRoot := addSandbox(t)
+	require.NoError(t, os.RemoveAll(filepath.Join(projectRoot, ".claude")))
+	// .aider as a regular file blocks the second scaffold and aborts
+	// the run after .codex has already landed on disk.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".aider"), []byte("ha"), 0o644))
+
+	_, err := Add(AddOptions{
+		ProjectPath: projectRoot,
+		Dirs:        []string{".codex", ".aider"},
+		Create:      true,
+	})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
+
+	// .codex (the successful first scaffold) was rolled back.
+	require.NoDirExists(t, filepath.Join(projectRoot, ".codex"),
+		"earlier successful scaffold must be removed when a later one fails")
+	// .aider is still the file the user had - we never touched it.
+	got, err := os.ReadFile(filepath.Join(projectRoot, ".aider"))
+	require.NoError(t, err)
+	require.Equal(t, "ha", string(got))
+}
+
 func TestAddRejectsInvalidBasenameName(t *testing.T) {
 	// project at a path whose basename violates the strict-slug rule.
 	// add must fail fast with a clear message naming "project path

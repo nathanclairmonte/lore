@@ -32,11 +32,11 @@ const scaffoldDefaultFile = "AGENTS.md"
 // nil).
 //
 // Refuses (CodeRefusedSafety) when the path at dirName exists as a
-// regular file or as a symlink - both would mislead the user about
-// what's on disk and the symlink case is the slice-3 safety violation
-// the orchestrator handles separately. Cleans up the freshly-created
-// directory if the file write fails so a partial scaffold doesn't leave
-// cruft behind.
+// regular file or as a symlink: scaffolding over a regular file would
+// silently clobber user content, and a symlink there is a state lore
+// can't safely take ownership of without breaking whatever the link
+// currently points at. Cleans up the freshly-created directory if the
+// file write fails so a partial scaffold doesn't leave cruft behind.
 func scaffoldAgentDir(root, dirName, fileName string) (bool, error) {
 	target := filepath.Join(root, dirName)
 	info, err := os.Lstat(target)
