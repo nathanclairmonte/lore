@@ -3,7 +3,6 @@ package project
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,13 +80,8 @@ func PreflightRm(name string) (RmPlan, error) {
 	}
 
 	// snapshot pre-mutation state so Remove's post-Save rollback can
-	// restore it. State.Projects is a map (reference type), so a
-	// shallow State copy isn't enough; copy the entries.
-	origState := state.State{
-		SchemaVersion: st.SchemaVersion,
-		Projects:      make(map[string]state.ProjectEntry, len(st.Projects)),
-	}
-	maps.Copy(origState.Projects, st.Projects)
+	// restore it.
+	origState := st.Clone()
 
 	plan := RmPlan{
 		ProjectName: name,
