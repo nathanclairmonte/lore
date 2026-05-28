@@ -82,7 +82,7 @@ This separation is load-bearing. The central repo is portable and machine-agnost
 
 - **CLI binary:** `lore`
 - **Repository default name:** `agent-context` (user-overridable)
-- **Default agent dir candidates** (auto-detected at `lore add` time): `.claude`, `.agents`, `.cursor`, `.aider`
+- **Default agent dir candidates** (auto-detected at `lore add` time): `.agents`, `.claude`, `.codex`, `.cursor`
 
 ---
 
@@ -132,8 +132,9 @@ projects_roots = [
 projects_root_depth = 2
 
 # Agent directory names to auto-detect during `lore add`.
-# First match wins; user can override with --dir.
-agent_dirs = [".claude", ".agents", ".cursor", ".aider"]
+# All detected dirs are tracked together; pass --dir to scope a run.
+# Order drives the interactive picker for `lore add --create`.
+agent_dirs = [".agents", ".claude", ".codex", ".cursor"]
 
 # Commit behaviour for lore's own operations.
 [commit]
@@ -262,15 +263,15 @@ lore add                              # from cwd, auto-detect everything
 lore add ~/code/my-app                # explicit project path
 lore add --dir .agents                # explicit agent dir name (skip selector)
 lore add --name foo-work              # override project name
-lore add --create                     # create a starter .claude/ if none exists
+lore add --create                     # scaffold an empty agent dir if none exists
 lore add --no-commit                  # stage in central but don't commit
 ```
 
 Detection chain:
 
 1. **Project path:** cwd unless overridden positionally.
-2. **Project name:** basename of project path unless overridden with `--name`.
-3. **Agent dir:** iterate `agent_dirs` from config and collect every one that exists at the project root. If multiple exist, all of them are added by default; pass `--dir` (repeatable) to scope to a subset. If none exists and `--create` is set, create an empty `.claude/` with a starter `CLAUDE.md`.
+2. **Project name:** basename of project path unless overridden with `--name`. Both paths run through a strict-slug validator (letters, digits, dots, dashes; must start with a letter or digit) before any work happens, so an invalid name fails fast rather than landing in central state. If `--name` resolves to a project already in local state at a different path, or to a `central/projects/<name>/` directory that local state doesn't know about, lore exits 4 with a message suggesting `--name <alternative>` (and, in the latter case, `lore use <name>` to adopt the orphan).
+3. **Agent dir:** iterate `agent_dirs` from config and collect every one that exists at the project root. If multiple exist, all of them are added by default; pass `--dir` (repeatable) to scope to a subset. If none exists and `--create` is set, scaffold the agent dir. With `--dir`, each named dir that doesn't already exist is created with an empty `AGENTS.md` inside (silent default; no prompts fire in scripted mode). Without `--dir`, an interactive picker offers the configured agent dirs (plus a free-text "other") and then a filename picker (`AGENTS.md` default, `CLAUDE.md`, free-text); non-TTY or `--json` mode requires `--dir` and exits 7 otherwise. Existing dirs are left untouched (idempotent skip). The starter file is intentionally empty — users own the content.
 4. **Tracked-file safety check:** for each agent dir being added, refuse if any file inside is currently tracked by the project's git repo. Moving tracked content into central and replacing it with a symlink would silently change git's view of the project. Error message must tell the user how to recover (e.g. `git rm --cached -r .claude && git commit` then retry).
 5. **Gitignore check:** run `git check-ignore -v` on each agent dir path. If not ignored, present an interactive picker with three options: append to repo `.gitignore` (default — survives clones, scoped to this repo), append to global gitignore (machine-wide), append to `.git/info/exclude` (repo-local, doesn't survive clones). Refuse to proceed silently if not ignored. `lore link` re-runs `git check-ignore` on each linked agent dir; if a fresh clone comes up not-ignored (typical for the `.git/info/exclude` choice), warn and offer to re-apply via the same picker.
 
@@ -303,6 +304,7 @@ Failure modes (each with a distinct exit code):
 - Project already tracked → idempotent no-op with friendly status.
 - Symlink already exists at expected location pointing elsewhere → refuse, suggest `lore unlink` first.
 - Name collision with an existing tracked project → suggest `--name <alternative>`.
+- Name collision with a `central/projects/<name>/` directory not present in local state (typical for a fresh machine pointed at an existing central repo, or after a state-file wipe) → suggest `--name <alternative>` or `lore use <name>` to adopt it.
 - No agent directory found and `--create` not passed → error.
 - Agent dir contains files tracked by the project's git repo → refuse with recovery instructions (see detection step 4).
 

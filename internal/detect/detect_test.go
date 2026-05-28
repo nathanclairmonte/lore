@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var defaultCandidates = []string{".claude", ".agents", ".cursor", ".aider"}
+var defaultCandidates = []string{".agents", ".claude", ".codex", ".cursor"}
 
 func namesOf(dirs []AgentDir) []string {
 	out := make([]string, 0, len(dirs))

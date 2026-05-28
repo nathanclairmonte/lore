@@ -36,13 +36,17 @@ const (
 	// StatusSkippedSafety is set when a slice-3 safety check refused this
 	// dir; other dirs in the same run may still have been added.
 	StatusSkippedSafety DirStatus = "skipped-safety"
+	// StatusScaffolded is set when --create created this dir fresh in
+	// this run AND the normal add flow succeeded on it. Idempotent
+	// re-creates (dir already existed) report as StatusAdded instead.
+	StatusScaffolded DirStatus = "scaffolded"
 )
 
 // AgentDirResult is the per-dir outcome inside an AddResult.
 type AgentDirResult struct {
 	Name        string
 	Status      DirStatus
-	CentralPath string             // populated for StatusAdded and StatusAlreadyTracked
+	CentralPath string             // populated for StatusAdded, StatusAlreadyTracked, StatusScaffolded
 	Violations  []detect.Violation // populated for StatusSkippedSafety
 }
 
@@ -54,6 +58,11 @@ type AddResult struct {
 	CentralRepo   string // central repo root (for the Next hint)
 	CommitMessage string // empty when nothing was newly added
 	Dirs          []AgentDirResult
+	// ScaffoldRequested is true when the user passed --create. Carried
+	// even when no scaffolding actually happened (all targets already
+	// existed) so JSON consumers can distinguish "user asked for
+	// create" from "lore decided to create".
+	ScaffoldRequested bool
 }
 
 // AllAlreadyTracked reports whether every per-dir result is
@@ -120,7 +129,15 @@ func Add(opts AddOptions) (AddResult, error) {
 		return AddResult{}, err
 	}
 
-	projectName := filepath.Base(projectPath)
+	projectName := opts.Name
+	nameSource := "--name"
+	if projectName == "" {
+		projectName = filepath.Base(projectPath)
+		nameSource = "project path basename"
+	}
+	if err := ValidateProjectName(projectName, nameSource); err != nil {
+		return AddResult{}, err
+	}
 
 	trackedEntry, isTracked := st.ProjectEntryFor(projectName)
 	if isTracked && trackedEntry.Path != projectPath {
@@ -128,8 +145,53 @@ func Add(opts AddOptions) (AddResult, error) {
 		// a conflict the orchestrator can't silently resolve. Catch it
 		// before any per-dir work so the user sees the cleanest error.
 		return AddResult{}, lerr.Newf(lerr.CodeConflict,
-			"project %q is already tracked at %s",
+			"project %q is already tracked at %s — use --name <alternative> to track this project under a different name",
 			projectName, config.Contract(trackedEntry.Path))
+	}
+
+	// central-orphan probe: name not in this machine's state but the
+	// dir already exists in central. happens on a fresh machine pointed
+	// at an existing central repo, or after the user nuked their local
+	// state. without this gate, the next central.AddAgentDir call would
+	// land into an already-occupied projects/<name>/ and silently merge
+	// histories under a misleading project label.
+	if !isTracked {
+		orphan, err := centralProjectDirExists(c, projectName)
+		if err != nil {
+			return AddResult{}, err
+		}
+		if orphan {
+			return AddResult{}, lerr.Newf(lerr.CodeConflict,
+				"name %q already exists in central but isn't tracked on this machine — use --name <alternative>, or run `lore use %s` to adopt it",
+				projectName, projectName)
+		}
+	}
+
+	// --create pre-step: scaffold requested agent dirs (if any are
+	// missing) before DetectAgentDirs runs. Detection then finds the
+	// freshly-scaffolded dirs alongside any pre-existing ones, and
+	// downstream selection/safety/picker/onboard flow is unchanged.
+	// Errors here (target exists as a file, picker dismissal in
+	// interactive mode, permission denied) abort BEFORE any central or
+	// state writes happen.
+	scaffoldedSet := map[string]bool{}
+	if opts.Create {
+		choices, err := scaffoldChoicesFromOptions(opts.Dirs, cfg.AgentDirs)
+		if err != nil {
+			return AddResult{}, err
+		}
+		for _, choice := range choices {
+			created, err := scaffoldAgentDir(projectPath, choice.DirName, choice.FileName)
+			if err != nil {
+				return AddResult{}, err
+			}
+			if created {
+				scaffoldedSet[choice.DirName] = true
+				output.Success("Scaffolded %s/ with empty %s", choice.DirName, choice.FileName)
+			} else {
+				output.Hint("%s already exists; skipping scaffold", choice.DirName)
+			}
+		}
 	}
 
 	detected, err := detect.DetectAgentDirs(projectPath, cfg.AgentDirs)
@@ -158,7 +220,8 @@ func Add(opts AddOptions) (AddResult, error) {
 		// no --dir and no detected dirs and no tracked dirs - nothing to do.
 		return AddResult{}, lerr.Newf(lerr.CodeNotFound,
 			"no agent directory found at %s (looked for: %s)",
-			config.Contract(projectPath), strings.Join(cfg.AgentDirs, ", "))
+			config.Contract(projectPath), strings.Join(cfg.AgentDirs, ", ")).
+			WithHint("pass --create to scaffold an empty agent dir, or create one manually and rerun")
 	}
 
 	// classify each selected name into one of three buckets: already
@@ -327,9 +390,13 @@ func Add(opts AddOptions) (AddResult, error) {
 			st.RemoveAgentDir(projectName, dirName)
 		})
 
+		status := StatusAdded
+		if scaffoldedSet[d.Name] {
+			status = StatusScaffolded
+		}
 		addedDirs = append(addedDirs, AgentDirResult{
 			Name:        d.Name,
-			Status:      StatusAdded,
+			Status:      status,
 			CentralPath: destPath,
 		})
 	}
@@ -374,11 +441,12 @@ func Add(opts AddOptions) (AddResult, error) {
 	allDirs = append(allDirs, skipped...)
 
 	result := AddResult{
-		ProjectName:   projectName,
-		ProjectPath:   projectPath,
-		CentralRepo:   c.Path,
-		CommitMessage: commitMessage,
-		Dirs:          allDirs,
+		ProjectName:       projectName,
+		ProjectPath:       projectPath,
+		CentralRepo:       c.Path,
+		CommitMessage:     commitMessage,
+		Dirs:              allDirs,
+		ScaffoldRequested: opts.Create,
 	}
 
 	if len(skipped) > 0 {
@@ -492,6 +560,27 @@ func resolveSelection(requested []string, detected []detect.AgentDir, tracked, s
 		}
 	}
 	return out, nil
+}
+
+// centralProjectDirExists reports whether central/projects/<name>/ is
+// present on disk. The orchestrator uses this to surface a collision
+// when --name (or the basename-derived name) would land into a central
+// project the local state doesn't know about - typically a fresh
+// machine pointed at an existing central repo, or a state-file wipe.
+func centralProjectDirExists(c *central.Central, name string) (bool, error) {
+	path := c.ProjectPath(name, "")
+	// ProjectPath joins projects/<name>/"" → projects/<name> (trailing
+	// separator stripped by Join). Stat the directory itself rather than
+	// any specific agent dir inside it.
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, lerr.Wrap(lerr.CodeGenericError, err,
+			fmt.Sprintf("cannot stat %s", path))
+	}
+	return info.IsDir(), nil
 }
 
 // untrackedSymlinkCandidates returns candidate names from cfg.AgentDirs

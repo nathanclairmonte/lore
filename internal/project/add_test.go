@@ -31,6 +31,25 @@ func stubPicker(t *testing.T, choice prompt.GitignoreTarget, err error) *int {
 	return &count
 }
 
+// stubScaffoldPickers swaps both scaffold picker vars so --create tests
+// can exercise the interactive path without driving huh. dirName and
+// fileName are returned by the respective pickers; pass an error to
+// simulate dismissal. Returns separate counters so tests can assert
+// which prompts fired.
+func stubScaffoldPickers(t *testing.T, dirName, fileName string, dirErr, fileErr error) (dirCalls, fileCalls *int) {
+	t.Helper()
+	dc, fc := 0, 0
+	prevDir := pickScaffoldDir
+	prevFile := pickScaffoldFile
+	pickScaffoldDir = func([]string) (string, error) { dc++; return dirName, dirErr }
+	pickScaffoldFile = func() (string, error) { fc++; return fileName, fileErr }
+	t.Cleanup(func() {
+		pickScaffoldDir = prevDir
+		pickScaffoldFile = prevFile
+	})
+	return &dc, &fc
+}
+
 // unignoreSandbox clears the .git/info/exclude entry addSandbox plants
 // so check-ignore reports .claude as not ignored, forcing Add into the
 // picker path.
@@ -382,6 +401,8 @@ func TestAddNoAgentDirFound(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, lerr.CodeNotFound, lerr.CodeOf(err))
 	require.Contains(t, err.Error(), "no agent directory found")
+	// hint must mention --create so the user knows the recovery path.
+	require.Contains(t, lerr.HintOf(err), "--create")
 }
 
 func TestAddIdempotentReRun(t *testing.T) {
@@ -889,4 +910,214 @@ func TestAddRejectsOldSchemaState(t *testing.T) {
 	_, err = Add(AddOptions{ProjectPath: projectRoot})
 	require.Error(t, err)
 	require.Equal(t, lerr.CodeInconsistency, lerr.CodeOf(err))
+}
+
+// ---------------- slice 6: --name and --create ----------------
+
+func TestAddNameOverride(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+
+	res, err := Add(AddOptions{ProjectPath: projectRoot, Name: "foo-alt"})
+	require.NoError(t, err)
+
+	require.Equal(t, "foo-alt", res.ProjectName)
+	require.Equal(t,
+		filepath.Join(centralPath, "projects", "foo-alt", ".claude"),
+		res.Dirs[0].CentralPath)
+	// central project lives under the override, not the basename.
+	require.DirExists(t, filepath.Join(centralPath, "projects", "foo-alt", ".claude"))
+	require.NoDirExists(t, filepath.Join(centralPath, "projects", "my-app"))
+	// state keyed by the override.
+	st, _, err := state.Load()
+	require.NoError(t, err)
+	entry, ok := st.ProjectEntryFor("foo-alt")
+	require.True(t, ok)
+	require.Equal(t, projectRoot, entry.Path)
+}
+
+func TestAddNameStateDriftConflict(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	// tracked first under the basename.
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+
+	// new project at a different path collides on basename.
+	other := filepath.Join(filepath.Dir(filepath.Dir(projectRoot)), "elsewhere", "my-app")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, ".claude"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(other, ".claude", "CLAUDE.md"),
+		[]byte("ctx"), 0o644))
+	_, err = git.Run(other, "init")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(other, ".git", "info", "exclude"),
+		[]byte(".claude/\n"), 0o644))
+
+	_, err = Add(AddOptions{ProjectPath: other})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeConflict, lerr.CodeOf(err))
+	require.Contains(t, err.Error(), "use --name",
+		"drift message must point the user at --name")
+}
+
+func TestAddCentralOrphanConflict(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+
+	// simulate a fresh machine: wipe local state, leave central intact.
+	statePath, err := state.Path()
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(statePath))
+
+	// a second project, different path, that wants the same name.
+	other := filepath.Join(filepath.Dir(filepath.Dir(projectRoot)), "elsewhere", "anything")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, ".claude"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(other, ".claude", "CLAUDE.md"),
+		[]byte("ctx"), 0o644))
+	_, err = git.Run(other, "init")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(other, ".git", "info", "exclude"),
+		[]byte(".claude/\n"), 0o644))
+
+	_, err = Add(AddOptions{ProjectPath: other, Name: "my-app"})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeConflict, lerr.CodeOf(err))
+	require.Contains(t, err.Error(), "central",
+		"orphan message must mention central")
+	require.Contains(t, err.Error(), "lore use",
+		"orphan message must mention lore use as the adoption path")
+}
+
+func TestAddCreateWithDirScaffoldsAndProceeds(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	// remove the pre-existing .claude so --create has work to do.
+	require.NoError(t, os.RemoveAll(filepath.Join(projectRoot, ".claude")))
+	// scaffolded dirs aren't gitignored on creation; stub the picker so
+	// the gitignore step doesn't bail with CodeInconsistency in this
+	// non-TTY test environment.
+	stubPicker(t, prompt.TargetRepoExclude, nil)
+
+	res, err := Add(AddOptions{
+		ProjectPath: projectRoot,
+		Dirs:        []string{".claude"},
+		Create:      true,
+	})
+	require.NoError(t, err)
+	require.True(t, res.ScaffoldRequested)
+	require.Len(t, res.Dirs, 1)
+	require.Equal(t, StatusScaffolded, res.Dirs[0].Status)
+	// the on-disk file is the empty AGENTS.md default, moved into central.
+	starter := filepath.Join(centralPath, "projects", "my-app", ".claude", "AGENTS.md")
+	require.FileExists(t, starter)
+	info, err := os.Stat(starter)
+	require.NoError(t, err)
+	require.Zero(t, info.Size(), "starter file is intentionally empty")
+}
+
+func TestAddCreateInteractivePicksDirAndFile(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	require.NoError(t, os.RemoveAll(filepath.Join(projectRoot, ".claude")))
+	dirCalls, fileCalls := stubScaffoldPickers(t, ".codex", "CLAUDE.md", nil, nil)
+	stubPicker(t, prompt.TargetRepoExclude, nil)
+
+	res, err := Add(AddOptions{ProjectPath: projectRoot, Create: true})
+	require.NoError(t, err)
+	require.Equal(t, 1, *dirCalls, "scaffold dir picker must fire")
+	require.Equal(t, 1, *fileCalls, "scaffold file picker must fire")
+
+	require.Len(t, res.Dirs, 1)
+	require.Equal(t, ".codex", res.Dirs[0].Name)
+	require.Equal(t, StatusScaffolded, res.Dirs[0].Status)
+	require.FileExists(t,
+		filepath.Join(centralPath, "projects", "my-app", ".codex", "CLAUDE.md"))
+}
+
+func TestAddCreateSkipsExistingDir(t *testing.T) {
+	// .claude already exists per addSandbox. --create --dir .claude
+	// should treat it as an idempotent skip (no StatusScaffolded, no
+	// Scaffolded flag, the pre-existing CLAUDE.md is untouched).
+	_, projectRoot := addSandbox(t)
+	beforeFile := filepath.Join(projectRoot, ".claude", "CLAUDE.md")
+	beforeContent, err := os.ReadFile(beforeFile)
+	require.NoError(t, err)
+
+	res, err := Add(AddOptions{
+		ProjectPath: projectRoot,
+		Dirs:        []string{".claude"},
+		Create:      true,
+	})
+	require.NoError(t, err)
+	require.True(t, res.ScaffoldRequested)
+	require.Len(t, res.Dirs, 1)
+	require.Equal(t, StatusAdded, res.Dirs[0].Status,
+		"existing dir flows through normal add, not StatusScaffolded")
+	require.NotEqual(t, StatusScaffolded, res.Dirs[0].Status,
+		"existing dir flowed through normal add, not scaffolded")
+	// no AGENTS.md got written next to the existing CLAUDE.md.
+	require.NoFileExists(t,
+		filepath.Join(res.Dirs[0].CentralPath, "AGENTS.md"))
+	// pre-existing content survived.
+	afterContent, err := os.ReadFile(filepath.Join(res.Dirs[0].CentralPath, "CLAUDE.md"))
+	require.NoError(t, err)
+	require.Equal(t, beforeContent, afterContent)
+}
+
+func TestAddCreateNonTTYWithoutDirIsInconsistency(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	require.NoError(t, os.RemoveAll(filepath.Join(projectRoot, ".claude")))
+	// NO stubScaffoldPickers — the real prompt.PickScaffoldDir must run
+	// and fail the isTTY gate (go test stdin is not a terminal).
+
+	_, err := Add(AddOptions{ProjectPath: projectRoot, Create: true})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeInconsistency, lerr.CodeOf(err))
+	require.Contains(t, lerr.HintOf(err), "--dir",
+		"non-TTY hint must point at --dir as the scriptable alternative")
+}
+
+func TestAddRejectsInvalidName(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+
+	cases := []struct {
+		name    string
+		nameArg string
+	}{
+		{"space", "my project"},
+		{"slash", "foo/bar"},
+		{"leading dot", ".hidden"},
+		{"leading dash", "-flag"},
+		{"single dot", "."},
+		{"double dot", ".."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Add(AddOptions{ProjectPath: projectRoot, Name: tc.nameArg})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "valid project name",
+				"invalid --name must surface a clear validation error")
+		})
+	}
+}
+
+func TestAddRejectsInvalidBasenameName(t *testing.T) {
+	// project at a path whose basename violates the strict-slug rule.
+	// add must fail fast with a clear message naming "project path
+	// basename" as the source so the user knows the fix is to rename
+	// the dir or pass --name.
+	addSandbox(t)
+	weird := filepath.Join(os.Getenv("HOME"), "code", "my project")
+	require.NoError(t, os.MkdirAll(filepath.Join(weird, ".claude"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(weird, ".claude", "CLAUDE.md"),
+		[]byte("ctx"), 0o644))
+	_, err := git.Run(weird, "init")
+	require.NoError(t, err)
+
+	_, err = Add(AddOptions{ProjectPath: weird})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "project path basename")
+	require.Contains(t, err.Error(), "my project")
 }

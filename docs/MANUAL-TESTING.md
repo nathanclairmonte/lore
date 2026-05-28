@@ -30,13 +30,13 @@ When the agent dir of a project isn't gitignored, `lore add` opens an interactiv
 
 1. `task setup` has been run (see the section above).
 2. `lore-dev init` has been run at least once. Accept the default `~/agent-context` or point it at your preferred location — see [Pointing init at a custom path](#pointing-init-at-a-custom-path) below.
-3. The default agent dir name used by these recipes (`.aider`) is not already in your global gitignore. Verify with:
+3. The default agent dir name used by these recipes (`.codex`) is not already in your global gitignore. Verify with:
 
    ```bash
-   git -C /tmp check-ignore -v .aider
+   git -C /tmp check-ignore -v .codex
    ```
 
-   Should print nothing. If `.aider` is in your global rules (e.g. `~/.gitignore_global` referenced via `core.excludesFile`, or `~/.config/git/ignore`), pick a different default agent dir that's clean for you and adapt `scripts/smoke-picker-reset.sh` + the verification steps below.
+   Should print nothing. If `.codex` is in your global rules (e.g. `~/.gitignore_global` referenced via `core.excludesFile`, or `~/.config/git/ignore`), pick a different default agent dir that's clean for you and adapt `scripts/smoke-picker-reset.sh` + the verification steps below.
 
 ### Pointing init at a custom path
 
@@ -48,7 +48,7 @@ cat > ~/.config/lore/config.toml <<EOF
 central_repo = "/your/preferred/path/agent-context"
 projects_roots = ["~/Canonical/git-repos", "~/PersonalProjects/git-repos"]
 projects_root_depth = 2
-agent_dirs = [".claude", ".agents", ".cursor", ".aider"]
+agent_dirs = [".agents", ".claude", ".codex", ".cursor"]
 [commit]
 auto = true
 add_template     = "feat: add {project}"
@@ -71,7 +71,7 @@ Each scenario assumes a clean sandbox. Reset with:
 task smoke:picker-reset
 ```
 
-This wipes `/tmp/lore-smoke/demo-project`, the central's copy under `projects/demo-project/`, and lore's state file; then rebuilds a fresh `demo-project` with `.aider/` as the agent dir. The script lives at `scripts/smoke-picker-reset.sh` if you want to read or adapt it.
+This wipes `/tmp/lore-smoke/demo-project`, the central's copy under `projects/demo-project/`, and lore's state file; then rebuilds a fresh `demo-project` with `.codex/` as the agent dir. The script lives at `scripts/smoke-picker-reset.sh` if you want to read or adapt it.
 
 The script will refuse with a hint if `lore-dev` isn't installed or no central repo exists yet, pointing you back at `task setup` or `lore-dev init`.
 
@@ -84,9 +84,9 @@ lore-dev add /tmp/lore-smoke/demo-project
 
 - **Picker:** three options, "Append to repo .gitignore (survives clones)" pre-selected. Press Enter.
 - **Verify:**
-  - `cat /tmp/lore-smoke/demo-project/.gitignore` is exactly `.aider`
-  - `/tmp/lore-smoke/demo-project/.aider` is a symlink into central
-  - `git -C /tmp/lore-smoke/demo-project status` shows only `.gitignore` as untracked (NOT `.aider`)
+  - `cat /tmp/lore-smoke/demo-project/.gitignore` is exactly `.codex`
+  - `/tmp/lore-smoke/demo-project/.codex` is a symlink into central
+  - `git -C /tmp/lore-smoke/demo-project status` shows only `.gitignore` as untracked (NOT `.codex`)
   - Central commit landed: `git -C "$(lore-dev path --repo)" log --oneline | head -1` shows `feat: add demo-project`
 
 ### Scenario 2 — pick "global gitignore"
@@ -98,13 +98,13 @@ lore-dev add /tmp/lore-smoke/demo-project
 
 - **Picker:** arrow-down once, Enter.
 - **Verify:**
-  - Confirmation line: `✓ added .aider to <your global excludes path>`
-  - The global excludes file (whatever `git config --global --get core.excludesFile` returns, or `~/.config/git/ignore` if unset) now ends with `.aider`
+  - Confirmation line: `✓ added .codex to <your global excludes path>`
+  - The global excludes file (whatever `git config --global --get core.excludesFile` returns, or `~/.config/git/ignore` if unset) now ends with `.codex`
   - `cat /tmp/lore-smoke/demo-project/.gitignore` returns "no such file"
   - `git -C /tmp/lore-smoke/demo-project status` shows no untracked entries
 - **Cleanup (important — this leaks into your real global gitignore):**
   ```bash
-  sed -i '/^\.aider$/d' "$(git config --global --get core.excludesFile)"
+  sed -i '/^\.codex$/d' "$(git config --global --get core.excludesFile)"
   # if core.excludesFile is unset, edit ~/.config/git/ignore instead
   ```
 
@@ -117,8 +117,8 @@ lore-dev add /tmp/lore-smoke/demo-project
 
 - **Picker:** arrow-down twice, Enter.
 - **Verify:**
-  - Confirmation line: `✓ added .aider to /tmp/lore-smoke/demo-project/.git/info/exclude`
-  - `cat /tmp/lore-smoke/demo-project/.git/info/exclude` ends with `.aider`
+  - Confirmation line: `✓ added .codex to /tmp/lore-smoke/demo-project/.git/info/exclude`
+  - `cat /tmp/lore-smoke/demo-project/.git/info/exclude` ends with `.codex`
   - `cat /tmp/lore-smoke/demo-project/.gitignore` returns "no such file"
   - `git -C /tmp/lore-smoke/demo-project status` shows no untracked entries
 
@@ -135,7 +135,7 @@ echo $?
 - **Error message:** mentions "must be gitignored"
 - **Disk state:**
   - `/tmp/lore-smoke/demo-project/.gitignore` does NOT exist (no stray write)
-  - `/tmp/lore-smoke/demo-project/.aider` is still a real directory (not a symlink — lore didn't proceed)
+  - `/tmp/lore-smoke/demo-project/.codex` is still a real directory (not a symlink — lore didn't proceed)
   - No `projects/demo-project/` directory under central
   - No new commit on central's HEAD
 

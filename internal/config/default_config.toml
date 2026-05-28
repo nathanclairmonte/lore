@@ -13,8 +13,10 @@ projects_roots = [
 projects_root_depth = 2
 
 # Agent directory names to auto-detect during `lore add`.
-# First match wins; user can override with --dir.
-agent_dirs = [".claude", ".agents", ".cursor", ".aider"]
+# All detected dirs are tracked together; pass --dir to scope a run.
+# Order drives the interactive picker for `lore add --create` when no
+# --dir is given.
+agent_dirs = [".agents", ".claude", ".codex", ".cursor"]
 
 # Commit behaviour for lore's own operations.
 [commit]

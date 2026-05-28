@@ -15,4 +15,19 @@ type AddOptions struct {
 	// again (extending a tracked project is supported via a fresh
 	// `--dir` invocation).
 	Dirs []string
+
+	// Name overrides the project name lore records (and uses to key
+	// central/projects/<name>/). Empty means "use filepath.Base of the
+	// resolved project path". Useful when two projects share a basename
+	// in different parents, or when the user wants a different label in
+	// central than the on-disk directory name.
+	Name string
+
+	// Create asks Add to scaffold an agent dir at the project root when
+	// none would otherwise be found. With --dir, each named dir that
+	// doesn't already exist is scaffolded (silent default filename). Without
+	// --dir, an interactive picker collects a (dir, file) pair. Existing
+	// dirs are left untouched (idempotent skip). Non-TTY without --dir is
+	// CodeInconsistency.
+	Create bool
 }

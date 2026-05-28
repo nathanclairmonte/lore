@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Resets the slice 4 (lore add gitignore picker) manual-smoke sandbox so
 # the next `lore-dev add` runs against a fresh, non-tracked demo-project
-# with .aider as the agent dir. See docs/MANUAL-TESTING.md for the full
+# with .codex as the agent dir. See docs/MANUAL-TESTING.md for the full
 # scenario walkthrough this script feeds into.
 #
 # Kept dumb on purpose: no flags, no overrides. The fixture name
-# (demo-project) and agent dir (.aider) are hard-coded because the doc's
-# verification steps reference them by name. .aider is also the only
+# (demo-project) and agent dir (.codex) are hard-coded because the doc's
+# verification steps reference them by name. .codex is also the only
 # default agent dir name unlikely to already match a developer's global
 # gitignore; that's what lets the picker actually fire.
 set -euo pipefail
@@ -52,12 +52,12 @@ rm -f "$STATE_FILE"
 # scenario walkthrough's manual setup block would otherwise paste.
 mkdir -p "$SMOKE_DIR"
 git init "$PROJECT" >/dev/null
-mkdir "$PROJECT/.aider"
-echo "test aider md" > "$PROJECT/.aider/AIDER.md"
+mkdir "$PROJECT/.codex"
+echo "test codex md" > "$PROJECT/.codex/CODEX.md"
 # blank out .git/info/exclude in case a previous scenario 3 wrote to it
 # (the file exists by default with git's instructional comments).
 : > "$PROJECT/.git/info/exclude"
 
-echo "reset done: $PROJECT is fresh and .aider is not yet gitignored."
-echo "sanity check (should print nothing if .aider is reachable to the picker):"
-git -C "$PROJECT" check-ignore -v .aider || true
+echo "reset done: $PROJECT is fresh and .codex is not yet gitignored."
+echo "sanity check (should print nothing if .codex is reachable to the picker):"
+git -C "$PROJECT" check-ignore -v .codex || true

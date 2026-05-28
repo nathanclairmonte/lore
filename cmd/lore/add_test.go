@@ -61,6 +61,41 @@ func TestLoreAdd_HappyPath(t *testing.T) {
 	require.Equal(t, "feat: add my-app", msg)
 }
 
+func TestLoreAdd_NameFlagRecordsOverride(t *testing.T) {
+	home, projectRoot := addCmdSandbox(t)
+
+	require.Equal(t, 0, run([]string{"add", "--name", "foo-alt", projectRoot}))
+
+	// central project lives under the override, not the basename.
+	require.DirExists(t,
+		filepath.Join(home, "agent-context", "projects", "foo-alt", ".claude"))
+	require.NoDirExists(t,
+		filepath.Join(home, "agent-context", "projects", "my-app"))
+
+	// symlink points at the override path.
+	target, err := os.Readlink(filepath.Join(projectRoot, ".claude"))
+	require.NoError(t, err)
+	require.Equal(t,
+		filepath.Join(home, "agent-context", "projects", "foo-alt", ".claude"),
+		target)
+
+	// commit message uses the override.
+	msg, err := git.Run(filepath.Join(home, "agent-context"), "log", "-1", "--pretty=%s")
+	require.NoError(t, err)
+	require.Equal(t, "feat: add foo-alt", msg)
+}
+
+func TestLoreAdd_CreateWithoutDirIsInconsistency(t *testing.T) {
+	_, projectRoot := addCmdSandbox(t)
+	// remove the pre-existing .claude so --create has work to do.
+	require.NoError(t, os.RemoveAll(filepath.Join(projectRoot, ".claude")))
+
+	// no --dir + no TTY: the scaffold dir picker bails with exit 7
+	// before any disk side effects land.
+	require.Equal(t, 7, run([]string{"add", "--create", projectRoot}),
+		"--create without --dir in non-interactive mode must exit 7")
+}
+
 func TestLoreAdd_RefusesNotGitignoredAndNoTTY(t *testing.T) {
 	_, projectRoot := addCmdSandbox(t)
 	// blank out the exclude rule so check-ignore says "not ignored".
