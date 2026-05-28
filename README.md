@@ -6,6 +6,13 @@ single private central repository, symlinked into each project on disk.
 Status: early development. See [docs/SPEC.md](docs/SPEC.md) for the
 intended design.
 
+## Supported platforms
+
+Linux and macOS. Windows is not supported natively; use WSL. See
+[ADR 0001](.claude/adr/0001-linux-and-macos-only.md) for the reasoning
+(POSIX symlinks are core to lore's mechanism and the Windows equivalents
+have meaningfully different traversal semantics).
+
 ## Install
 
 ```
