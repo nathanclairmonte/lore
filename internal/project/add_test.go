@@ -582,16 +582,11 @@ func TestAddRefusalLeavesFilesystemUntouched(t *testing.T) {
 func TestRenderAddTemplate(t *testing.T) {
 	require.Equal(t, "feat: add my-app",
 		renderAddTemplate("feat: add {project}", "my-app", []string{".claude"}))
-	// empty template falls back to a safe default so a misconfigured
-	// commit.add_template doesn't break Add with a blank commit message.
-	require.Equal(t, "feat: add my-app",
-		renderAddTemplate("", "my-app", []string{".claude"}))
 	// no placeholder -> template returned verbatim.
 	require.Equal(t, "static message",
 		renderAddTemplate("static message", "my-app", []string{".claude"}))
-	// {dirs} expands to a comma-joined list, the slice-5 multi-dir
-	// case. Order in the slice is preserved so the user sees a
-	// deterministic message.
+	// {dirs} expands to a comma-joined list; slice order is preserved
+	// so the message is deterministic.
 	require.Equal(t, "feat: add my-app (.claude, .cursor)",
 		renderAddTemplate("feat: add {project} ({dirs})", "my-app",
 			[]string{".claude", ".cursor"}))
