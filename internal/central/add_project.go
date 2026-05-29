@@ -147,6 +147,37 @@ func (c *Central) ProjectPath(name, dirName string) string {
 	return filepath.Join(c.Path, "projects", name, dirName)
 }
 
+// ListProjects returns the names of every tracked project (the
+// subdirectories of projects/), in deterministic (sorted) order. Skips
+// the .gitkeep placeholder and any non-directory entries. Returns an
+// empty slice (never nil-vs-empty surprises) when nothing is tracked.
+//
+// central is the authority on which projects exist; `lore link --all`
+// enumerates from here rather than from local state so a project tracked
+// in central but never linked on this machine still gets located.
+func (c *Central) ListProjects() ([]string, error) {
+	projectsDir := filepath.Join(c.Path, "projects")
+	entries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, lerr.Newf(lerr.CodeNotFound,
+				"central repo at %s has no projects directory", c.Path)
+		}
+		return nil, lerr.Wrap(lerr.CodeGenericError, err,
+			fmt.Sprintf("cannot read %s", projectsDir))
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		// .gitkeep keeps projects/ in git while empty; it is not a project.
+		if !e.IsDir() || e.Name() == ".gitkeep" {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // ProjectAgentDirs returns the names of every agent directory tracked
 // under projects/<name>/, in deterministic (sorted) order. Returns
 // CodeNotFound when the project dir is missing or empty.

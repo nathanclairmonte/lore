@@ -5,8 +5,7 @@ central_repo = "~/agent-context"
 # Supports multiple roots for developers whose projects live in
 # more than one parent directory.
 projects_roots = [
-  "~/Canonical/git-repos",
-  "~/PersonalProjects/git-repos",
+  "~/code",
 ]
 
 # How deep to recurse under each root when scanning.

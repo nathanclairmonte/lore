@@ -51,6 +51,7 @@ func newRootCmd() *cobra.Command {
 		"Disable ANSI color output (NO_COLOR env var is also honored)")
 	root.AddCommand(newInitCmd())
 	root.AddCommand(newAddCmd())
+	root.AddCommand(newLinkCmd())
 	root.AddCommand(newPathCmd())
 	root.AddCommand(newUnlinkCmd())
 	root.AddCommand(newRmCmd())
