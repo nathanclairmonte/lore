@@ -73,14 +73,10 @@ func (r LinkResult) AllAlreadyLinked() bool {
 // LinkOptions selects which project to link and where. An empty Name means
 // "resolve the project from cwd" (bare `lore link`). Path overrides the
 // on-disk location and requires Name; an empty Path falls back to the
-// recorded local-state path (or cwd, in the bare form). Batch is set by
-// `lore link --all` to keep the run non-interactive: the gitignore
-// re-check still runs but never prompts, so a recovery sweep can't stall
-// on a picker.
+// recorded local-state path (or cwd, in the bare form).
 type LinkOptions struct {
-	Name  string
-	Path  string
-	Batch bool
+	Name string
+	Path string
 }
 
 // Link (re)creates the symlinks for a tracked project at its on-disk
@@ -99,10 +95,11 @@ type LinkOptions struct {
 // both halves of the outcome (mirrors add's partial-success contract).
 //
 // After linking, each correctly-linked dir is re-checked with
-// git check-ignore. An un-ignored dir triggers an advisory offer to
-// re-apply the gitignore picker (human, interactive runs only); declining,
-// a non-interactive context, or Batch leaves a warning but never fails the
-// run.
+// git check-ignore and any un-ignored dir is flagged on its LinkDirResult.
+// Acting on that flag (the interactive picker, or the advisory warning) is
+// the caller's job via OfferGitignoreFixes, so the link summary can be
+// rendered before the user is prompted. Always advisory: it never fails
+// the run.
 func Link(opts LinkOptions) (LinkResult, error) {
 	cfg, _, err := config.Load()
 	if err != nil {
@@ -117,7 +114,7 @@ func Link(opts LinkOptions) (LinkResult, error) {
 		return LinkResult{}, err
 	}
 
-	name, projectPath, err := resolveLinkTarget(opts, &st, c)
+	name, projectPath, err := resolveLinkTarget(opts, &st, c, cfg.ProjectsRoots)
 	if err != nil {
 		return LinkResult{}, err
 	}
@@ -152,9 +149,11 @@ func Link(opts LinkOptions) (LinkResult, error) {
 	}
 	success = true
 
-	// advisory gitignore re-check, after the success boundary so it can
-	// never roll back a link. mutates result.Dirs[].Unignored in place.
-	recheckGitignore(projectPath, &result, opts.Batch)
+	// advisory gitignore detection, after the success boundary so it can
+	// never roll back a link. only flags un-ignored dirs on the result;
+	// the caller decides whether to offer the picker (interactive) or just
+	// warn, so the link summary is printed before any prompt fires.
+	detectUnignored(projectPath, &result)
 
 	return result, linkErr
 }
@@ -214,12 +213,14 @@ type LinkAllResult struct {
 //     several matches report "ambiguous" with a disambiguation command per
 //     candidate, and none reports "missing".
 //
-// Fully non-interactive: per-project linking runs in Batch mode so the
-// gitignore re-check never prompts mid-sweep. Missing and ambiguous are
-// not failures (exit 0; the summary lists next steps); a drift refusal on a
-// located project returns CodeRefusedSafety (exit 5), and a hard error
-// returns its code. The sweep never aborts on a per-project problem - it
-// records the verdict and continues, returning the worst code seen.
+// Fully non-interactive: per-project linking only detects un-ignored dirs
+// (it never offers the picker), so the sweep can't stall on a prompt; the
+// summary aggregates every un-ignored dir with a re-run hint instead.
+// Missing and ambiguous are not failures (exit 0; the summary lists next
+// steps); a drift refusal on a located project returns CodeRefusedSafety
+// (exit 5), and a hard error returns its code. The sweep never aborts on a
+// per-project problem - it records the verdict and continues, returning the
+// worst code seen.
 func LinkAll() (LinkAllResult, error) {
 	cfg, _, err := config.Load()
 	if err != nil {
@@ -239,7 +240,7 @@ func LinkAll() (LinkAllResult, error) {
 		return LinkAllResult{}, err
 	}
 
-	result := LinkAllResult{ScannedRoots: append([]string(nil), cfg.ProjectsRoots...)}
+	var result LinkAllResult
 	if len(names) == 0 {
 		return result, nil
 	}
@@ -256,6 +257,13 @@ func LinkAll() (LinkAllResult, error) {
 			continue
 		}
 		needScan = append(needScan, name)
+	}
+
+	// only record (and later report) the scanned roots when a scan actually
+	// runs: when every project resolves from its recorded path there is
+	// nothing to scan, so claiming we swept the roots would be misleading.
+	if len(needScan) > 0 {
+		result.ScannedRoots = append([]string(nil), cfg.ProjectsRoots...)
 	}
 
 	scanned, err := scan.ScanRoots(cfg.ProjectsRoots, cfg.ProjectsDepth, needScan)
@@ -285,11 +293,13 @@ func LinkAll() (LinkAllResult, error) {
 	return result, worst
 }
 
-// linkOneInSweep links a single project inside a --all sweep (Batch mode)
-// and classifies the outcome into a per-project verdict. path empty means
-// "use the recorded local-state path"; a non-empty path relocates there.
+// linkOneInSweep links a single project inside a --all sweep and classifies
+// the outcome into a per-project verdict. path empty means "use the recorded
+// local-state path"; a non-empty path relocates there. The sweep never
+// offers the gitignore picker (OfferGitignoreFixes is not called here), so a
+// located project's un-ignored dirs surface only as advisory flags.
 func linkOneInSweep(name, path string) LinkProjectResult {
-	res, err := Link(LinkOptions{Name: name, Path: path, Batch: true})
+	res, err := Link(LinkOptions{Name: name, Path: path})
 	pr := LinkProjectResult{Name: name, Link: res, Path: res.ProjectPath}
 	switch {
 	case err != nil && lerr.CodeOf(err) == lerr.CodeRefusedSafety:
@@ -431,8 +441,15 @@ func linkProject(st *state.State, c *central.Central, name, projectPath string) 
 		}
 	}
 
+	// the per-dir reasons already live on result.Dirs[].Err and are
+	// rendered by the output layer, so the returned error stays a concise
+	// CodeRefusedSafety summary rather than re-joining every message: that
+	// avoids main.go printing the full reasons a second time after the
+	// per-dir lines.
 	if len(refusals) > 0 {
-		return rollbacks, result, errors.Join(refusals...)
+		return rollbacks, result, lerr.Newf(lerr.CodeRefusedSafety,
+			"refused to link %d of %d agent dir(s) for %q", len(refusals), len(dirNames), name).
+			WithHint("remove the conflicting dir(s) (or run `lore unlink` first), then re-run `lore link`")
 	}
 	return rollbacks, result, nil
 }
@@ -477,9 +494,11 @@ func classifyLinkDir(linkPath, expectedTarget string) (LinkDirStatus, error) {
 //
 // Bare form (resolve from cwd): (a) the longest recorded path that is cwd
 // or an ancestor of cwd wins outright; else (b) cwd's basename matching a
-// tracked central project name links there, recording cwd; else
-// CodeNotFound with a --path / --all hint.
-func resolveLinkTarget(opts LinkOptions, st *state.State, c *central.Central) (name, projectPath string, err error) {
+// tracked central project name links there, recording cwd, but ONLY when cwd
+// lives under a configured projects_root - otherwise a directory that merely
+// shares a name with a tracked project (say ~/scratch/my-app) would silently
+// get symlinks dropped into it; else CodeNotFound with a --path / --all hint.
+func resolveLinkTarget(opts LinkOptions, st *state.State, c *central.Central, roots []string) (name, projectPath string, err error) {
 	if opts.Name != "" {
 		if _, derr := c.ProjectAgentDirs(opts.Name); derr != nil {
 			if lerr.CodeOf(derr) == lerr.CodeNotFound {
@@ -533,14 +552,42 @@ func resolveLinkTarget(opts LinkOptions, st *state.State, c *central.Central) (n
 		return "", "", listErr
 	}
 	for _, n := range names {
-		if n == base {
-			return n, canon, nil
+		if n != base {
+			continue
 		}
+		// basename matches a tracked project, but only trust it when cwd is
+		// under a configured projects_root: that's the signal that this dir
+		// really is the project, not an unrelated one that happens to share
+		// the name. refuse the guess otherwise, pointing at the explicit form.
+		if !pathUnderAnyRoot(canon, roots) {
+			return "", "", lerr.Newf(lerr.CodeNotFound,
+				"%s matches tracked project %q by name but is not under any configured projects_root",
+				config.Contract(canon), n).
+				WithHint(fmt.Sprintf("run `lore link %s --path %s` to link here explicitly, or add this location to projects_roots", n, config.Contract(canon)))
+		}
+		return n, canon, nil
 	}
 
 	return "", "", lerr.Newf(lerr.CodeNotFound,
 		"no tracked project resolves from %s", config.Contract(canon)).
 		WithHint("run `lore link <name> --path <path>`, or `lore link --all` to scan your projects_roots")
+}
+
+// pathUnderAnyRoot reports whether dir is at or below one of the configured
+// projects_roots. Roots are symlink-resolved best-effort so the comparison
+// holds even when a root is reached through an intermediate symlink (dir is
+// already canonicalized by the caller).
+func pathUnderAnyRoot(dir string, roots []string) bool {
+	for _, root := range roots {
+		canonRoot := root
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			canonRoot = resolved
+		}
+		if isSelfOrAncestor(canonRoot, dir) {
+			return true
+		}
+	}
+	return false
 }
 
 // longestRecordedAncestor returns the tracked project whose recorded path
@@ -571,18 +618,18 @@ func isSelfOrAncestor(ancestor, descendant string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// recheckGitignore re-runs git check-ignore on each correctly-linked dir
-// and, for any that come up un-ignored, either offers the gitignore picker
-// (interactive human runs) or just flags Unignored for an advisory
-// warning (batch, non-TTY, JSON, or a declined picker). Always advisory:
-// it never fails the run and never rolls back a link.
+// detectUnignored re-runs git check-ignore on each correctly-linked dir and
+// flags Unignored on any that come up un-ignored (common after a clone that
+// recorded the original choice in .git/info/exclude, which clones don't
+// carry). Pure detection: it does not prompt or write. Acting on the flag is
+// OfferGitignoreFixes' job, kept separate so the caller can render the link
+// summary before any picker fires. Never fails the run.
 //
 // A project that isn't a git repo is skipped wholesale: check-ignore folds
 // "not a repo" into "not ignored", so without a repo there is nothing to
 // ignore and nothing worth warning about.
-func recheckGitignore(projectPath string, result *LinkResult, batch bool) {
-	repoTop, err := git.RepoToplevel(projectPath)
-	if err != nil {
+func detectUnignored(projectPath string, result *LinkResult) {
+	if _, err := git.RepoToplevel(projectPath); err != nil {
 		return
 	}
 	for i := range result.Dirs {
@@ -594,8 +641,32 @@ func recheckGitignore(projectPath string, result *LinkResult, batch bool) {
 		if checkErr != nil || ignored {
 			continue
 		}
-		if batch || !applyGitignorePicker(d.Name, projectPath, repoTop) {
-			d.Unignored = true
+		d.Unignored = true
+	}
+}
+
+// OfferGitignoreFixes walks a single-project link result and, for every dir
+// flagged Unignored, offers the interactive gitignore picker; when the user
+// picks a target and the dir ends up ignored, the flag is cleared so the
+// caller's warning pass stays quiet for it. Any non-interactive context, a
+// declined picker, or a failed write leaves the flag set for an advisory
+// warning. Always advisory: it never errors and never rolls back a link.
+//
+// Call this AFTER rendering the link summary so the user sees what was linked
+// before being prompted. `lore link --all` deliberately does not call it: the
+// sweep stays non-interactive and reports un-ignored dirs in its footer.
+func OfferGitignoreFixes(result *LinkResult) {
+	repoTop, err := git.RepoToplevel(result.ProjectPath)
+	if err != nil {
+		return
+	}
+	for i := range result.Dirs {
+		d := &result.Dirs[i]
+		if !d.Unignored {
+			continue
+		}
+		if applyGitignorePicker(d.Name, result.ProjectPath, repoTop) {
+			d.Unignored = false
 		}
 	}
 }

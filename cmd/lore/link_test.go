@@ -141,6 +141,26 @@ func TestLoreLink_BareFromCwdBasenameMatch(t *testing.T) {
 	require.Equal(t, claudeTarget(home), target)
 }
 
+func TestLoreLink_BareUnrelatedBasenameRefuses(t *testing.T) {
+	home, _ := postAddCmdSandbox(t)
+
+	// drop local state so ancestry can't match; central still tracks my-app.
+	require.Equal(t, 0, run([]string{"unlink", "my-app"}))
+
+	// a directory that merely shares the project's basename but lives OUTSIDE
+	// any configured projects_root (~/code). a bare link must not guess this
+	// unrelated dir is the project and drop symlinks into it.
+	unrelated := filepath.Join(home, "scratch", "my-app")
+	require.NoError(t, os.MkdirAll(unrelated, 0o755))
+	t.Chdir(unrelated)
+
+	require.Equal(t, 3, run([]string{"link"}))
+
+	_, err := os.Lstat(filepath.Join(unrelated, ".claude"))
+	require.True(t, os.IsNotExist(err),
+		"a name-matching dir outside projects_roots must not be linked")
+}
+
 // postAddMultiDirCmdSandbox onboards my-app with two agent dirs (.claude
 // and .cursor) so multi-dir link behavior can be exercised end to end.
 func postAddMultiDirCmdSandbox(t *testing.T) (home, projectRoot string) {

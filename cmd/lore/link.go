@@ -72,7 +72,15 @@ gitignore picker; this is advisory and never fails the run.`,
 			// per-dir refusal aggregation a refused run still returns a
 			// populated result, so this gate passes on refusals too.
 			if res.ProjectName != "" {
+				// summary first, THEN the gitignore picker, so the user sees
+				// what was linked before being prompted. the picker is
+				// suppressed in JSON mode (machine output never prompts);
+				// any dir it can't fix falls through to an advisory warning.
 				output.PrintLinkResult(linkResultForOutput(res))
+				if output.GetMode() != output.ModeJSON {
+					project.OfferGitignoreFixes(&res)
+				}
+				output.PrintLinkGitignoreWarnings(linkResultForOutput(res))
 			}
 			return err
 		},

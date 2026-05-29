@@ -41,8 +41,12 @@ type LinkResult struct {
 //   - Every dir already linked: terse "already linked" line so idempotent
 //     re-runs stay quiet.
 //   - Otherwise: header (project + path) plus one line per dir describing
-//     what happened (linked / already linked / refused), then an advisory
-//     gitignore warning for any dir that came up un-ignored.
+//     what happened (linked / already linked / refused).
+//
+// Gitignore warnings are NOT printed here: the cmd layer offers the
+// interactive picker after this summary and then calls
+// PrintLinkGitignoreWarnings for anything still un-ignored, so the user sees
+// what was linked before being prompted.
 //
 // Suppressed in JSON mode.
 func PrintLinkResult(r LinkResult) {
@@ -53,7 +57,6 @@ func PrintLinkResult(r LinkResult) {
 	if allAlreadyLinked(r.Dirs) {
 		Success("Project %s is already linked (%s)",
 			r.ProjectName, config.Contract(r.ProjectPath))
-		printGitignoreWarnings(r)
 		return
 	}
 
@@ -79,8 +82,6 @@ func PrintLinkResult(r LinkResult) {
 			Warn("Refused %s: %s", config.Contract(d.LinkPath), reason)
 		}
 	}
-
-	printGitignoreWarnings(r)
 }
 
 // allAlreadyLinked reports whether every dir was already correctly linked
@@ -97,9 +98,16 @@ func allAlreadyLinked(dirs []LinkDirResult) bool {
 	return true
 }
 
-// printGitignoreWarnings emits an advisory warning per un-ignored dir,
-// nudging the user toward an interactive re-run that offers the picker.
-func printGitignoreWarnings(r LinkResult) {
+// PrintLinkGitignoreWarnings emits an advisory warning per still-un-ignored
+// dir, nudging the user toward an interactive re-run that offers the picker.
+// Called by the cmd layer after PrintLinkResult and OfferGitignoreFixes, so
+// only dirs the picker couldn't (or wasn't allowed to) fix warn here.
+//
+// Suppressed in JSON mode.
+func PrintLinkGitignoreWarnings(r LinkResult) {
+	if mode == ModeJSON {
+		return
+	}
 	for _, d := range r.Dirs {
 		if !d.Unignored {
 			continue
@@ -150,17 +158,21 @@ func PrintLinkAllResult(r LinkAllResult) {
 		return
 	}
 
-	_, _ = fmt.Fprintln(Out, "Scanning configured roots for tracked projects...")
-	for _, root := range r.ScannedRoots {
-		_, _ = fmt.Fprintf(Out, "  %s\n", config.Contract(root))
+	// only announce a scan when one actually ran: when every project
+	// resolved from its recorded path ScannedRoots is empty, and claiming we
+	// swept the roots would be misleading.
+	if len(r.ScannedRoots) > 0 {
+		_, _ = fmt.Fprintln(Out, "Scanning configured roots for tracked projects...")
+		for _, root := range r.ScannedRoots {
+			_, _ = fmt.Fprintf(Out, "  %s\n", config.Contract(root))
+		}
+		Blank()
 	}
 
 	if len(r.Projects) == 0 {
-		Blank()
 		Success("No tracked projects in the central repo")
 		return
 	}
-	Blank()
 
 	g := activeGlyphs()
 	okStyle := styleSuccess()
