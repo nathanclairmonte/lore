@@ -137,6 +137,8 @@ func sampleAddResult() AddResult {
 		ProjectPath:   "/home/u/code/my-app",
 		CentralRepo:   "/home/u/agent-context",
 		CommitMessage: "feat: add my-app",
+		CommitSHA:     "0123456789abcdef0123456789abcdef01234567",
+		SyncBase:      "0123456789abcdef0123456789abcdef01234567",
 		Dirs: []AddDirResult{{
 			Name:        ".claude",
 			Status:      StatusAdded,
@@ -153,6 +155,8 @@ func sampleMultiAddResult() AddResult {
 		ProjectPath:   "/home/u/code/my-app",
 		CentralRepo:   "/home/u/agent-context",
 		CommitMessage: "feat: add my-app",
+		CommitSHA:     "0123456789abcdef0123456789abcdef01234567",
+		SyncBase:      "0123456789abcdef0123456789abcdef01234567",
 		Dirs: []AddDirResult{
 			{
 				Name:        ".claude",
@@ -178,6 +182,8 @@ func samplePartialAddResult() AddResult {
 		ProjectPath:   "/home/u/code/my-app",
 		CentralRepo:   "/home/u/agent-context",
 		CommitMessage: "feat: add my-app",
+		CommitSHA:     "0123456789abcdef0123456789abcdef01234567",
+		SyncBase:      "0123456789abcdef0123456789abcdef01234567",
 		Dirs: []AddDirResult{
 			{
 				Name:        ".cursor",
@@ -221,6 +227,13 @@ func TestGolden_PrintAddResult_PartialFailure(t *testing.T) {
 	out, _ := withCleanState(t, true)
 	PrintAddResult(samplePartialAddResult())
 	assertGolden(t, "add_partial_failure", out.String())
+}
+
+func TestGolden_PrintAddResult_JSON(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintAddResult(sampleAddResult())
+	assertGolden(t, "add_fresh_json", out.String())
 }
 
 func TestGolden_PrintAddResult_AlreadyTracked(t *testing.T) {
@@ -316,12 +329,25 @@ func TestJSONMode_SuppressesHumanPrinters(t *testing.T) {
 	Warn("anything")
 	Hint("anything")
 	Blank()
-	PrintAddResult(sampleAddResult())
 	PrintInitResult(sampleInitResult(false, false))
 	PrintError(lerr.New(lerr.CodeGenericError, "x"))
 
 	require.Empty(t, out.String(), "human printers must be silent in JSON mode")
 	require.Empty(t, errBuf.String(), "PrintError must be silent in JSON mode")
+}
+
+func TestJSONMode_PrintAddResult(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintAddResult(sampleAddResult())
+	var got addJSONEnvelope
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	require.Equal(t, "my-app", got.Project.Name)
+	require.Equal(t, sampleAddResult().SyncBase, got.SyncBase)
+	require.NotNil(t, got.Commit)
+	require.Equal(t, sampleAddResult().CommitSHA, got.Commit.SHA)
+	require.Len(t, got.Dirs, 1)
+	require.Empty(t, got.Dirs[0].Violations)
 }
 
 // --- color/no-color toggling -----------------------------------------

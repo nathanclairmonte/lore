@@ -1,6 +1,7 @@
 package output
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/nathanclairmonte/lore/internal/config"
@@ -16,6 +17,7 @@ const (
 	StatusAlreadyTracked AddDirStatus = "already-tracked"
 	StatusSkippedSafety  AddDirStatus = "skipped-safety"
 	StatusScaffolded     AddDirStatus = "scaffolded"
+	StatusAdopted        AddDirStatus = "adopted"
 )
 
 // AddSafetyViolation mirrors detect.Violation in shape (Kind + Message)
@@ -46,6 +48,8 @@ type AddResult struct {
 	ProjectPath   string
 	CentralRepo   string
 	CommitMessage string
+	CommitSHA     string
+	SyncBase      string
 	Dirs          []AddDirResult
 	// ScaffoldRequested mirrors the orchestrator's flag: true when the
 	// user passed --create, even when no scaffolding actually happened.
@@ -83,6 +87,7 @@ func (r AddResult) allAlreadyTracked() bool {
 // the human block is just skipped so script callers don't get noise.
 func PrintAddResult(r AddResult) {
 	if mode == ModeJSON {
+		_ = json.NewEncoder(Out).Encode(addEnvelope(r))
 		return
 	}
 	if r.allAlreadyTracked() {
@@ -113,12 +118,11 @@ func PrintAddResult(r AddResult) {
 			// the user sees the create event in real time alongside the
 			// gitignore picker writes.
 			addedCount++
-			_, _ = fmt.Fprintf(Out, "%s Moved  %s  %s  %s\n",
+			_, _ = fmt.Fprintf(Out, "%s Copied %s  %s  %s\n",
 				pathStyle.Render(g.arrowRight), d.Name,
 				pathStyle.Render(g.arrowRight), config.Contract(d.CentralPath))
-			_, _ = fmt.Fprintf(Out, "%s Linked %s  %s  %s\n",
-				pathStyle.Render(g.arrowRight), d.Name,
-				pathStyle.Render(g.arrowLeft), config.Contract(d.CentralPath))
+		case StatusAdopted:
+			Success("%s adopted from the matching central copy", d.Name)
 		case StatusAlreadyTracked:
 			Success("%s already tracked at %s", d.Name, config.Contract(d.CentralPath))
 		}
@@ -145,8 +149,67 @@ func PrintAddResult(r AddResult) {
 			Blank()
 		}
 		Success("Committed to central repo: %q", r.CommitMessage)
+		Success("Recorded sync-base: %s", r.SyncBase)
 		Blank()
 		path := shellQuoteForCD(config.Contract(r.CentralRepo), r.CentralRepo)
 		_, _ = fmt.Fprintf(Out, "Next: cd %s && git push\n", path)
 	}
+}
+
+type addJSONProject struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+type addJSONCommit struct {
+	SHA     string `json:"sha"`
+	Message string `json:"message"`
+}
+
+type addJSONViolation struct {
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+}
+
+type addJSONDir struct {
+	Name        string             `json:"name"`
+	Status      AddDirStatus       `json:"status"`
+	CentralPath *string            `json:"central_path"`
+	Violations  []addJSONViolation `json:"safety_violations"`
+}
+
+type addJSONEnvelope struct {
+	Project           addJSONProject `json:"project"`
+	CentralRepo       string         `json:"central_repo"`
+	Commit            *addJSONCommit `json:"commit"`
+	SyncBase          string         `json:"sync_base"`
+	ScaffoldRequested bool           `json:"scaffold_requested"`
+	Dirs              []addJSONDir   `json:"dirs"`
+}
+
+func addEnvelope(r AddResult) addJSONEnvelope {
+	envelope := addJSONEnvelope{
+		Project:     addJSONProject{Name: r.ProjectName, Path: r.ProjectPath},
+		CentralRepo: r.CentralRepo, SyncBase: r.SyncBase,
+		ScaffoldRequested: r.ScaffoldRequested,
+		Dirs:              make([]addJSONDir, 0, len(r.Dirs)),
+	}
+	if r.CommitSHA != "" {
+		envelope.Commit = &addJSONCommit{SHA: r.CommitSHA, Message: r.CommitMessage}
+	}
+	for _, dir := range r.Dirs {
+		item := addJSONDir{
+			Name: dir.Name, Status: dir.Status,
+			Violations: make([]addJSONViolation, 0, len(dir.SafetyViolations)),
+		}
+		if dir.CentralPath != "" {
+			path := dir.CentralPath
+			item.CentralPath = &path
+		}
+		for _, violation := range dir.SafetyViolations {
+			item.Violations = append(item.Violations, addJSONViolation(violation))
+		}
+		envelope.Dirs = append(envelope.Dirs, item)
+	}
+	return envelope
 }
