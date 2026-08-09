@@ -22,11 +22,11 @@ Managed by [lore](https://github.com/nathanclairmonte/lore).
 
 This repository holds per-project agentic AI context (` + "`.claude/`" + `,
 ` + "`.cursor/`" + `, ` + "`.aider/`" + `, etc.) under ` + "`projects/<name>/`" + `. Each
-tracked project's agent directories are symlinked from their on-disk
-locations into this repo.
+tracked checkout keeps real project copies and reconciles them with these
+central copies through lore.
 
-Do not edit files here by hand while a session is running; your harness's
-session-end hook may overwrite them.
+Use ` + "`lore push`" + ` and ` + "`lore pull`" + ` to reconcile copies. Use plain Git
+inside this repository to reach its remote.
 `
 
 // Central is a typed handle on a central repo on disk.

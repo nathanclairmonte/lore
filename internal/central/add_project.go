@@ -9,16 +9,14 @@ import (
 
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/git"
+	"github.com/nathanclairmonte/lore/internal/reconcile"
 )
 
-// AddAgentDir moves the directory at sourcePath into
-// projects/<name>/<dirName>/ inside the central repo and stages it.
+// AddAgentDir copies sourcePath into central and stages the new copy.
 // Returns the absolute destination path along with an undo closure the
 // orchestrator drives on failure:
 //
-//   - undo() reverses the rename, drops the staged path from the index,
-//     and removes projects/<name>/ if (and only if) AddAgentDir created
-//     it and no other agent dirs were added to it.
+//   - undo() removes the central copy and drops the staged path.
 //
 // Commits are NOT part of AddAgentDir's contract: a single `lore add`
 // may onboard multiple agent dirs and the orchestrator emits one commit
@@ -45,9 +43,6 @@ func (c *Central) AddAgentDir(name, dirName, sourcePath string) (
 			fmt.Sprintf("cannot stat %s", destAgentDir))
 	}
 
-	// track whether AddAgentDir created projects/<name>/ so undo only
-	// removes it when we did. extending an existing tracked project (the
-	// second agent dir flow) must leave the original dir alone.
 	createdProjectDir := false
 	if _, statErr := os.Stat(destProjectDir); errors.Is(statErr, os.ErrNotExist) {
 		if mkErr := os.MkdirAll(destProjectDir, 0o755); mkErr != nil {
@@ -60,15 +55,11 @@ func (c *Central) AddAgentDir(name, dirName, sourcePath string) (
 			fmt.Sprintf("cannot stat %s", destProjectDir))
 	}
 
-	if renameErr := os.Rename(sourcePath, destAgentDir); renameErr != nil {
-		// MkdirAll above may have created destProjectDir; clean it up
-		// (when we made it) so the caller can retry without inheriting
-		// the half-built state.
+	if copyErr := reconcile.CopyTree(sourcePath, destAgentDir); copyErr != nil {
 		if createdProjectDir {
 			_ = os.Remove(destProjectDir)
 		}
-		return "", nil, lerr.Wrap(lerr.CodeGenericError, renameErr,
-			fmt.Sprintf("cannot move %s into central repo", sourcePath))
+		return "", nil, copyErr
 	}
 
 	// -f forces past any gitignore rule that would otherwise exclude
@@ -80,16 +71,19 @@ func (c *Central) AddAgentDir(name, dirName, sourcePath string) (
 	// also fires inside the central repo.
 	relStaged := filepath.Join("projects", name, dirName)
 	if _, addErr := git.Run(c.Path, "add", "-f", relStaged); addErr != nil {
-		// undo the rename so callers see a clean slate; bare RemoveAll
-		// of the project dir would destroy user content if rename had
-		// landed under projects/<name>/.
-		if revertErr := os.Rename(destAgentDir, sourcePath); revertErr != nil {
-			fmt.Fprintf(os.Stderr,
-				"warning: failed to revert rename %s -> %s: %v\n",
-				destAgentDir, sourcePath, revertErr)
+		var cleanupErrors []error
+		if removeErr := os.RemoveAll(destAgentDir); removeErr != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove %s: %w", destAgentDir, removeErr))
 		}
 		if createdProjectDir {
-			_ = os.Remove(destProjectDir)
+			if removeErr := os.Remove(destProjectDir); removeErr != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("remove %s: %w", destProjectDir, removeErr))
+			}
+		}
+		if cleanupErr := errors.Join(cleanupErrors...); cleanupErr != nil {
+			return "", nil, lerr.Wrap(lerr.CodeInconsistency, addErr,
+				fmt.Sprintf("git add failed and central cleanup also failed: %v", cleanupErr)).
+				WithHint("remove the orphan central directory, then re-run `lore add`")
 		}
 		return "", nil, addErr
 	}
@@ -102,9 +96,9 @@ func (c *Central) AddAgentDir(name, dirName, sourcePath string) (
 				"warning: failed to reset index for %s: %v\n",
 				relStaged, resetErr)
 		}
-		if renameBackErr := os.Rename(destAgentDir, sourcePath); renameBackErr != nil {
-			return lerr.Wrap(lerr.CodeGenericError, renameBackErr,
-				fmt.Sprintf("cannot move %s back to %s", destAgentDir, sourcePath))
+		if removeErr := os.RemoveAll(destAgentDir); removeErr != nil {
+			return lerr.Wrap(lerr.CodeGenericError, removeErr,
+				fmt.Sprintf("cannot remove copied directory %s", destAgentDir))
 		}
 		// only remove projects/<name>/ if we created it for this add AND
 		// it's now empty. extending a tracked project leaves the dir
@@ -117,6 +111,11 @@ func (c *Central) AddAgentDir(name, dirName, sourcePath string) (
 	}
 
 	return destAgentDir, undo, nil
+}
+
+// HeadSHA returns the full commit SHA currently checked out in central.
+func (c *Central) HeadSHA() (string, error) {
+	return git.Run(c.Path, "rev-parse", "HEAD")
 }
 
 // Commit creates a commit on the central repo with the given message,

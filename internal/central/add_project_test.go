@@ -43,7 +43,7 @@ func makeProjectDir(t *testing.T, name string) string {
 	return agent
 }
 
-func TestAddAgentDirMovesAndStages(t *testing.T) {
+func TestAddAgentDirCopiesAndStages(t *testing.T) {
 	c := initCentralWithIdentity(t)
 	src := makeProjectDir(t, ".claude")
 
@@ -51,9 +51,8 @@ func TestAddAgentDirMovesAndStages(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, undo)
 
-	// source side: moved away
-	_, statErr := os.Stat(src)
-	require.True(t, os.IsNotExist(statErr))
+	// source side remains the real project copy.
+	require.FileExists(t, filepath.Join(src, "CLAUDE.md"))
 
 	// destination side: in place with content
 	require.Equal(t, filepath.Join(c.Path, "projects", "my-app", ".claude"), dest)
@@ -87,7 +86,7 @@ func TestCommitAdvancesHeadWithUserIdentity(t *testing.T) {
 	require.Equal(t, "test@example.com", author)
 }
 
-func TestAddAgentDirUndoReversesRename(t *testing.T) {
+func TestAddAgentDirUndoRemovesCentralCopy(t *testing.T) {
 	c := initCentralWithIdentity(t)
 	src := makeProjectDir(t, ".claude")
 
@@ -99,7 +98,7 @@ func TestAddAgentDirUndoReversesRename(t *testing.T) {
 
 	require.NoError(t, undo())
 
-	// source is back where it was, with content intact.
+	// source was never moved and remains intact.
 	require.FileExists(t, filepath.Join(src, "CLAUDE.md"))
 
 	// no projects/<name>/ left behind in central.
