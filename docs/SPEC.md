@@ -202,7 +202,7 @@ Schema v3 replaces the existing v2 layout. Version 2 already stored each project
 | 4 | Conflict / already exists | Project already tracked, name collision, symlink at expected location pointing elsewhere |
 | 5 | Refused for safety | Agent dir contains tracked files, agent dir is a symlink, nested `.git` present, gitignore picker dismissed |
 | 6 | Git / network failure | Central is behind remote (refused push), `git` operation failed, clone failed |
-| 7 | Inconsistency / unhealthy | `lore doctor` found unfixed problems, `lore status` found broken symlinks, broken config (e.g. empty `central_repo`), interactive prompt required but stdin is not a terminal |
+| 7 | Inconsistency / unhealthy | `lore doctor` found unfixed problems, `lore status` found divergence or unhealthy copy state, broken config (e.g. empty `central_repo`), interactive prompt required but stdin is not a terminal |
 
 ### `lore init`
 
@@ -481,17 +481,109 @@ scratch-project   .claude   ✗       projects/scratch-project/.claude (no check
 
 ### `lore status`
 
-Show health of one project or all.
+Show the sync state of one project or all tracked projects. Status is read-only.
 
 ```
 lore status                # all projects
-lore status my-app         # one project
+lore status my-app         # every checkout of one project
 lore status --json
 ```
 
-For a single project, shows: checkout path, agent dir name, symlink status, target validity, gitignore status, and central repo state (branch, uncommitted changes in that project's dir, behind/ahead of remote).
+Status compares each project copy and the committed central copy at `HEAD` against that
+checkout's sync-base. Every file or nested symlink is classified as `in-sync`,
+`project-ahead`, `central-ahead`, or `diverged`. Adds, modifications, deletions, executable
+state, object type, and symlink target changes all participate. Directories are structural
+containers and do not appear as file records because Git cannot reproduce empty directories.
 
-Exit code: `0` if all checked items are healthy; non-zero if any project has broken/missing symlinks or other inconsistencies.
+Checkout rollup follows these rules:
+
+- any diverged file makes the checkout diverged;
+- project-ahead and central-ahead files in the same checkout make the checkout diverged;
+- otherwise, the changed side determines the checkout state;
+- byte-identical project and central copies are in-sync, even if both changed from the base.
+  In that last case, `base_stale` is true because a later mutating command must adopt the
+  current central commit.
+
+Status reports health issues separately from the four sync states. Issues include a missing
+or invalid project copy, a missing central copy, an unreachable sync-base, unsupported
+filesystem objects, paths that cannot be inspected, unresolved Git-style conflict markers,
+and dirty central content in the project scope. Conflict-marker detection requires a complete
+ordered marker sequence in a regular UTF-8 text file. Lore does not follow symlinks while
+inspecting a copy.
+
+Each issue appears once at its narrowest scope. Agent-directory issues use that directory's
+`issues` array. Checkout-wide issues use the checkout's `issues` array. Project-wide issues
+use the project's `issues` array. Directory issue paths are relative to that agent directory.
+Checkout and project issue paths identify the affected absolute path or sync-base.
+
+The central side always comes from committed `HEAD`. Uncommitted, untracked, or ignored
+central content under the project is reported as `central-dirty`. Lore does not classify that
+working-tree content as if it were committed because the sync-base must remain reproducible.
+
+Human output includes per-directory counts for project-ahead, central-ahead, and diverged
+files. JSON output has this stable shape:
+
+```json
+{
+  "central_repo": "/home/nathan/agent-context",
+  "central_head": "89abcdef0123456789abcdef0123456789abcdef",
+  "projects": [{
+    "name": "my-app",
+    "checkouts": [{
+      "path": "/home/nathan/code/my-app",
+      "sync_base": "0123456789abcdef0123456789abcdef01234567",
+      "state": "project-ahead",
+      "base_stale": false,
+      "dirs": [{
+        "name": ".claude",
+        "state": "project-ahead",
+        "base_stale": false,
+        "counts": {"in_sync": 3, "project_ahead": 1, "central_ahead": 0, "diverged": 0},
+        "files": [{
+          "path": "CLAUDE.md",
+          "state": "project-ahead",
+          "project_change": "modified",
+          "central_change": "none",
+          "project": {"type": "file", "executable": false},
+          "central": {"type": "file", "executable": false},
+          "base": {"type": "file", "executable": false}
+        }],
+        "issues": []
+      }],
+      "issues": []
+    }],
+    "issues": []
+  }]
+}
+```
+
+`project_change` and `central_change` are `none`, `added`, `modified`, or `deleted` relative
+to the sync-base. Entry objects are `null` when that path is absent on a side.
+
+Exit code is `0` for in-sync, project-ahead, and central-ahead results. Status emits its full
+result and exits 7 when any checkout is diverged or has a health issue.
+
+### `lore diff`
+
+Show project-copy differences from committed central `HEAD`. Diff is read-only and inspects
+every recorded checkout for the named project.
+
+```
+lore diff my-app
+lore diff my-app --json
+```
+
+Human output shows unified patches for changed regular text files. Binary files, symlinks,
+type changes, and executable-state changes use metadata records. When central has dirty
+content in the project scope, diff reports the health issue and suppresses patches so it does
+not imply that the dirty working tree was compared.
+
+JSON uses the same envelope and file records as status, narrowed to paths where the project
+copy differs from committed central `HEAD`. Counts describe that narrowed `files` array, so
+`in_sync` is always zero in diff output. Patch text is not included in JSON.
+
+Ordinary differences, including divergence, exit 0. Unknown projects exit 3. Missing copies,
+unreachable bases, dirty central content, conflict markers, and other health issues exit 7.
 
 ### `lore path`
 
@@ -642,7 +734,7 @@ Captured here so they aren't lost. Order is rough priority guidance, not commitm
 - **`lore squash --since <ref>`** — rewrite a range of auto-sync commits into one meaningful commit, for users who want clean history without giving up auto-capture.
 - **`lore search <query>`** — full-text search across all tracked project lore. Needs an index (sqlite + fts5, or ripgrep-as-library).
 - **Common-locations hints in the central repo** — optional `projects/<name>/.lore.toml` recording common checkout paths to make first-time `lore link --all` smarter on a fresh machine. Skipped in v1 because `projects_roots` scanning should be sufficient; revisit if real friction emerges.
-- **`lore diff <project>`** and **`lore log <project>`** — thin scoped wrappers over `git diff` / `git log` for a project's directory in central. Possibly skip entirely if `cd $(lore path foo) && git log .` proves to be enough.
+- **`lore log <project>`**: thin scoped wrapper over `git log` for a project's directory in central. Possibly skip entirely if `cd $(lore path foo) && git log .` proves to be enough.
 
 ### Long-term / speculative
 
