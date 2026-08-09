@@ -65,6 +65,18 @@ type AddResult struct {
 	ScaffoldRequested bool
 }
 
+// openCentral opens the configured central repo and maps an absent repo to
+// the setup error shared by project commands.
+func openCentral(centralRepo string) (*central.Central, error) {
+	c, err := central.Open(centralRepo)
+	if err != nil && lerr.CodeOf(err) == lerr.CodeNotFound {
+		return nil, lerr.Newf(lerr.CodeSetupMissing,
+			"central repo not found at %s", config.Contract(centralRepo)).
+			WithHint("run `lore init` first")
+	}
+	return c, err
+}
+
 // AllAlreadyTracked reports whether every per-dir result is
 // StatusAlreadyTracked. The output layer uses this to render the terse
 // idempotent-reentry message instead of the full per-dir block.

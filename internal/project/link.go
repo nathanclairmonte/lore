@@ -316,19 +316,6 @@ func linkOneInSweep(name, path string) LinkProjectResult {
 	return pr
 }
 
-// openCentral opens the configured central repo, translating the
-// "not there yet" case into a CodeSetupMissing error that points the user
-// at `lore init`. Shared by Link and LinkAll.
-func openCentral(centralRepo string) (*central.Central, error) {
-	c, err := central.Open(centralRepo)
-	if err != nil && lerr.CodeOf(err) == lerr.CodeNotFound {
-		return nil, lerr.Newf(lerr.CodeSetupMissing,
-			"central repo not found at %s", config.Contract(centralRepo)).
-			WithHint("run `lore init` first")
-	}
-	return c, err
-}
-
 // dirExists reports whether path exists and is a directory (following
 // symlinks: a project root reached via a symlinked parent still counts).
 func dirExists(path string) bool {
