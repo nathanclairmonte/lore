@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -199,6 +200,130 @@ func samplePartialAddResult() AddResult {
 			},
 		},
 	}
+}
+
+func sampleSyncResult() SyncResult {
+	return SyncResult{
+		CentralRepo: "/home/u/agent-context",
+		CentralHead: "89abcdef0123456789abcdef0123456789abcdef",
+		Projects: []SyncProjectResult{{
+			Name: "my-app",
+			Checkouts: []SyncCheckoutResult{{
+				Path: "/home/u/code/my-app", SyncBase: "0123456789abcdef0123456789abcdef01234567",
+				State: "diverged", Dirs: []SyncDirResult{{
+					Name: ".claude", State: "diverged", Files: []SyncFileResult{
+						{
+							Path: "CLAUDE.md", State: "diverged", ProjectChange: "modified", CentralChange: "modified",
+							Project: &SyncEntry{Type: "file", Data: []byte("project\n")},
+							Central: &SyncEntry{Type: "file", Data: []byte("central\n")},
+							Base:    &SyncEntry{Type: "file", Data: []byte("base\n")},
+						},
+						{
+							Path: "notes.md", State: "project-ahead", ProjectChange: "added", CentralChange: "none",
+							Project: &SyncEntry{Type: "file", Data: []byte("notes\n")},
+						},
+					}, Issues: []SyncIssue{{Kind: SyncIssueConflictMarkers, Path: "CLAUDE.md", Message: "file contains unresolved conflict markers"}},
+				}}, Issues: []SyncIssue{},
+			}},
+		}},
+	}
+}
+
+func TestGolden_PrintStatus_Unicode(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	out, _ := withCleanState(t, true)
+	PrintStatus(sampleSyncResult())
+	assertGolden(t, "status_unicode", out.String())
+}
+
+func TestGolden_PrintStatus_ASCII(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	out, _ := withCleanState(t, false)
+	PrintStatus(sampleSyncResult())
+	assertGolden(t, "status_ascii", out.String())
+}
+
+func TestGolden_PrintStatus_JSON(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintStatus(sampleSyncResult())
+	assertGolden(t, "status_json", out.String())
+}
+
+func TestGolden_PrintDiff_Human(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	out, _ := withCleanState(t, false)
+	PrintDiff(sampleSyncResult())
+	assertGolden(t, "diff_human", out.String())
+}
+
+func TestGolden_PrintDiff_JSON(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintDiff(sampleSyncResult())
+	assertGolden(t, "diff_json", out.String())
+}
+
+func TestPrintDiffReportsEmptyAndBinaryFilesWithoutPatches(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	result := SyncResult{Projects: []SyncProjectResult{{
+		Name: "my-app", Checkouts: []SyncCheckoutResult{{
+			Path: "/work/my-app", Dirs: []SyncDirResult{{Name: ".claude", Files: []SyncFileResult{
+				{Path: "empty", State: "project-ahead", Project: &SyncEntry{Type: "file"}},
+				{Path: "binary", State: "diverged", Project: &SyncEntry{Type: "file", Data: []byte{0, 1}}, Central: &SyncEntry{Type: "file", Data: []byte{0, 2}}},
+			}}},
+		}},
+	}}}
+	PrintDiff(result)
+	require.Contains(t, out.String(), "project-ahead  .claude/empty")
+	require.Contains(t, out.String(), "diverged  .claude/binary")
+	require.NotContains(t, out.String(), "--- central/")
+}
+
+func TestPrintDiffProducesApplicableAddedFilePatch(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	result := SyncResult{Projects: []SyncProjectResult{{
+		Name: "my-app", Checkouts: []SyncCheckoutResult{{
+			Path: "/work/my-app", Dirs: []SyncDirResult{{Name: ".claude", Files: []SyncFileResult{{
+				Path: "notes.md", State: SyncProjectAhead,
+				Project: &SyncEntry{Type: SyncEntryFile, Data: []byte("notes\n")},
+			}}}},
+		}},
+	}}}
+	PrintDiff(result)
+	require.Contains(t, out.String(), "@@ -0,0 +1 @@")
+
+	worktree := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(worktree, ".claude"), 0o755))
+	cmd := exec.Command("git", "apply", "--check", "-")
+	cmd.Dir = worktree
+	cmd.Stdin = strings.NewReader(out.String())
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+}
+
+func TestPrintDiffMarksMissingFinalNewline(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	result := SyncResult{Projects: []SyncProjectResult{{
+		Name: "my-app", Checkouts: []SyncCheckoutResult{{
+			Path: "/work/my-app", Dirs: []SyncDirResult{{Name: ".claude", Files: []SyncFileResult{{
+				Path: "notes.md", State: SyncDiverged,
+				Project: &SyncEntry{Type: SyncEntryFile, Data: []byte("project")},
+				Central: &SyncEntry{Type: SyncEntryFile, Data: []byte("central")},
+			}}}},
+		}},
+	}}}
+	PrintDiff(result)
+	require.Equal(t, 2, strings.Count(out.String(), "\\ No newline at end of file"))
+
+	worktree := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(worktree, ".claude"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, ".claude", "notes.md"), []byte("central"), 0o644))
+	cmd := exec.Command("git", "apply", "--check", "-")
+	cmd.Dir = worktree
+	cmd.Stdin = strings.NewReader(out.String())
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
 }
 
 func TestGolden_PrintAddResult_Fresh_Unicode(t *testing.T) {

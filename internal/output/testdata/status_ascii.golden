@@ -1,0 +1,6 @@
+my-app
+  ~/code/my-app  diverged
+    .claude  diverged  P:1 C:0 D:1
+      diverged  CLAUDE.md
+      project-ahead  notes.md
+      [!] conflict-markers  .claude/CLAUDE.md: file contains unresolved conflict markers
