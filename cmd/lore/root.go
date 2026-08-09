@@ -28,7 +28,7 @@ func newRootCmd() *cobra.Command {
 		Short: "Version-controlled per-project agentic AI context",
 		Long: "lore keeps every tracked project's agent directories (.claude/, " +
 			".cursor/, .agents/, ...) in a single private central repository " +
-			"and symlinks them back into each project on disk.",
+			"and reconciles them with real copies in each project on disk.",
 		// silence cobra's default error/usage printing; main.go owns
 		// rendering errors through the output module.
 		SilenceErrors: true,
