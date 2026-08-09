@@ -412,6 +412,12 @@ func linkProject(st *state.State, c *central.Central, name, projectPath string) 
 		})
 		recorded = append(recorded, dirName)
 	}
+	refusalErr := lerr.Newf(lerr.CodeRefusedSafety,
+		"refused to link %d of %d agent dir(s) for %q", len(refusals), len(dirNames), name).
+		WithHint("remove the conflicting dir(s) (or run `lore unlink` first), then re-run `lore link`")
+	if len(recorded) == 0 {
+		return rollbacks, result, refusalErr
+	}
 
 	// record (or relocate) the project in local state. snapshot the prior
 	// entry first so the unwind restores it exactly. an existing entry at a
@@ -432,13 +438,17 @@ func linkProject(st *state.State, c *central.Central, name, projectPath string) 
 			delete(st.Projects, name)
 		}
 	})
-	if hadEntry && origEntry.Path != projectPath {
-		delete(st.Projects, name)
-	}
 	for _, dirName := range recorded {
-		if addErr := st.AddAgentDir(name, projectPath, dirName); addErr != nil {
+		if addErr := st.AddAgentDir(name, dirName); addErr != nil {
 			return rollbacks, LinkResult{}, addErr
 		}
+	}
+	base, baseErr := c.HeadSHA()
+	if baseErr != nil {
+		return rollbacks, LinkResult{}, baseErr
+	}
+	if recordErr := st.RecordCheckout(name, projectPath, base); recordErr != nil {
+		return rollbacks, LinkResult{}, recordErr
 	}
 
 	// the per-dir reasons already live on result.Dirs[].Err and are
@@ -447,9 +457,7 @@ func linkProject(st *state.State, c *central.Central, name, projectPath string) 
 	// avoids main.go printing the full reasons a second time after the
 	// per-dir lines.
 	if len(refusals) > 0 {
-		return rollbacks, result, lerr.Newf(lerr.CodeRefusedSafety,
-			"refused to link %d of %d agent dir(s) for %q", len(refusals), len(dirNames), name).
-			WithHint("remove the conflicting dir(s) (or run `lore unlink` first), then re-run `lore link`")
+		return rollbacks, result, refusalErr
 	}
 	return rollbacks, result, nil
 }
@@ -595,11 +603,13 @@ func pathUnderAnyRoot(dir string, roots []string) bool {
 // project nested inside another resolves to the inner one.
 func longestRecordedAncestor(st *state.State, dir string) (name, path string) {
 	for n, entry := range st.Projects {
-		if !isSelfOrAncestor(entry.Path, dir) {
-			continue
-		}
-		if len(entry.Path) > len(path) {
-			name, path = n, entry.Path
+		for _, checkout := range entry.Checkouts {
+			if !isSelfOrAncestor(checkout.Path, dir) {
+				continue
+			}
+			if len(checkout.Path) > len(path) {
+				name, path = n, checkout.Path
+			}
 		}
 	}
 	return name, path
@@ -686,6 +696,8 @@ func applyGitignorePicker(dirName, projectPath, repoTop string) bool {
 		return false
 	}
 	pattern := ignorePatternFor(target, dirName, projectPath, repoTop)
+	// link remains on the legacy symlink model until the pull slice replaces it.
+	pattern = strings.TrimSuffix(pattern, "/")
 	if err := git.AppendIgnoreEntry(targetPath, pattern); err != nil {
 		return false
 	}

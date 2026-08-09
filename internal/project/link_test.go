@@ -8,6 +8,7 @@ import (
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/git"
 	"github.com/nathanclairmonte/lore/internal/prompt"
+	"github.com/nathanclairmonte/lore/internal/state"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,7 +22,7 @@ func linkUnignoredSandbox(t *testing.T) (projectRoot string) {
 	_, err := Add(AddOptions{ProjectPath: projectRoot})
 	require.NoError(t, err)
 	unignoreSandbox(t, projectRoot)
-	require.NoError(t, os.Remove(filepath.Join(projectRoot, ".claude")))
+	require.NoError(t, os.RemoveAll(filepath.Join(projectRoot, ".claude")))
 	return projectRoot
 }
 
@@ -41,6 +42,21 @@ func TestLink_FlagsUnignoredDir(t *testing.T) {
 	ignored, err := git.CheckIgnore(projectRoot, ".claude")
 	require.NoError(t, err)
 	require.False(t, ignored, "Link must not silently re-ignore the dir on its own")
+}
+
+func TestLink_AllRefusedWithoutStateReturnsSafetyResult(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	statePath, err := state.Path()
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(statePath))
+
+	res, err := Link(LinkOptions{Name: "my-app", Path: projectRoot})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
+	require.Len(t, res.Dirs, 1)
+	require.Equal(t, LinkStatusRefused, res.Dirs[0].Status)
 }
 
 func TestOfferGitignoreFixes_IgnoresAndClearsFlag(t *testing.T) {

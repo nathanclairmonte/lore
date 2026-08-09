@@ -96,8 +96,9 @@ func PreflightRm(name string) (RmPlan, error) {
 	}
 
 	entry, tracked := st.ProjectEntryFor(name)
+	entryPath := primaryCheckoutPath(entry)
 	if tracked {
-		plan.ProjectPath = entry.Path
+		plan.ProjectPath = entryPath
 	}
 
 	if !tracked {
@@ -116,7 +117,7 @@ func PreflightRm(name string) (RmPlan, error) {
 		return plan, nil
 	}
 
-	dirs, refusal := previewUnlinkDirs(c, entry.Path, name, entry.AgentDirs)
+	dirs, refusal := previewUnlinkDirs(c, entryPath, name, entry.AgentDirs)
 	plan.Dirs = dirs
 	plan.RefusalErr = refusal
 	return plan, nil

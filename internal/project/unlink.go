@@ -243,7 +243,8 @@ func unlinkProject(st *state.State, c *central.Central, name string) (
 	}
 
 	result.ProjectName = name
-	result.ProjectPath = entry.Path
+	entryPath := primaryCheckoutPath(entry)
+	result.ProjectPath = entryPath
 
 	// classify every dir up front. drift A → already-unlinked; B/C →
 	// refused with the specific reason attached. we keep going past a
@@ -259,7 +260,7 @@ func unlinkProject(st *state.State, c *central.Central, name string) (
 	plans := make([]dirPlan, 0, len(entry.AgentDirs))
 	var refusals []error
 	for _, dirName := range entry.AgentDirs {
-		linkPath := filepath.Join(entry.Path, dirName)
+		linkPath := filepath.Join(entryPath, dirName)
 		expected := c.ProjectPath(name, dirName)
 		status, classifyErr := classifyAgentDirDrift(linkPath, expected)
 		if classifyErr != nil {

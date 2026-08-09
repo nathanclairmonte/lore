@@ -161,6 +161,7 @@ func Move(old, newName, newPath string) (MoveResult, error) {
 	origState := st.Clone()
 
 	entry, linkedHere := st.ProjectEntryFor(old)
+	entryPath := primaryCheckoutPath(entry)
 
 	// plans is the per-dir work list (empty when not linked here).
 	type movePlan struct {
@@ -176,7 +177,7 @@ func Move(old, newName, newPath string) (MoveResult, error) {
 	dstPath := ""
 
 	if linkedHere {
-		dstPath = entry.Path
+		dstPath = entryPath
 		if newPath != "" {
 			expanded, expErr := config.Expand(newPath)
 			if expErr != nil {
@@ -210,7 +211,7 @@ func Move(old, newName, newPath string) (MoveResult, error) {
 		// different per-dir plan in each mode.
 		var refusals []error
 		for _, dirName := range entry.AgentDirs {
-			oldLink := filepath.Join(entry.Path, dirName)
+			oldLink := filepath.Join(entryPath, dirName)
 			newLink := filepath.Join(dstPath, dirName)
 			oldExpected := c.ProjectPath(old, dirName)
 			newExpected := c.ProjectPath(newName, dirName)
@@ -304,7 +305,7 @@ func Move(old, newName, newPath string) (MoveResult, error) {
 		if failed > 0 {
 			where := "central at " + config.Contract(c.Path)
 			if linkedHere {
-				where += " and the symlinks under " + config.Contract(entry.Path)
+				where += " and the symlinks under " + config.Contract(entryPath)
 			}
 			fmt.Fprintf(os.Stderr,
 				"warning: %d rollback step(s) failed; the rename may be half-applied. "+
@@ -337,7 +338,7 @@ func Move(old, newName, newPath string) (MoveResult, error) {
 	if !linkedHere {
 		result.NotLinkedHere = true
 	} else {
-		result.OldPath = entry.Path
+		result.OldPath = entryPath
 		result.NewPath = dstPath
 
 		// --- Phase 3: symlink work --------------------------------------
@@ -389,7 +390,11 @@ func Move(old, newName, newPath string) (MoveResult, error) {
 		// change, only the central project folder did).
 		movedEntry := entry
 		if newPath != "" {
-			movedEntry.Path = dstPath
+			for i := range movedEntry.Checkouts {
+				if movedEntry.Checkouts[i].Path == entryPath {
+					movedEntry.Checkouts[i].Path = dstPath
+				}
+			}
 		}
 		delete(st.Projects, old)
 		st.Projects[newName] = movedEntry

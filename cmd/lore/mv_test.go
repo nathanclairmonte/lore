@@ -36,6 +36,7 @@ func addCmdProject(t *testing.T, home, name string) string {
 	require.NoError(t, os.WriteFile(
 		filepath.Join(root, ".git", "info", "exclude"), []byte(".claude/\n"), 0o644))
 	require.Equal(t, 0, run([]string{"add", root}))
+	makeLegacySymlinkFor(t, home, root, name, ".claude")
 	return root
 }
 
@@ -48,7 +49,7 @@ func addCmdSecondDir(t *testing.T, projectRoot string) {
 	require.NoError(t, os.WriteFile(
 		filepath.Join(projectRoot, ".git", "info", "exclude"),
 		[]byte(".claude/\n.cursor/\n"), 0o644))
-	require.Equal(t, 0, run([]string{"add", "--dir", ".cursor", projectRoot}))
+	addLegacySecondDir(t, os.Getenv("HOME"), projectRoot)
 }
 
 func centralDir(home string) string { return filepath.Join(home, "agent-context") }

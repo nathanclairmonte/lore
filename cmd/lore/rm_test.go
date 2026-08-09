@@ -146,7 +146,7 @@ func TestLoreRm_MultiAgentDirCleanRemoval(t *testing.T) {
 	require.NoError(t, os.WriteFile(
 		filepath.Join(projectRoot, ".git", "info", "exclude"),
 		[]byte(".claude/\n.cursor/\n"), 0o644))
-	require.Equal(t, 0, run([]string{"add", "--dir", ".cursor", projectRoot}))
+	addLegacySecondDir(t, home, projectRoot)
 
 	require.Equal(t, 0, run([]string{"rm", "--force", "my-app"}))
 

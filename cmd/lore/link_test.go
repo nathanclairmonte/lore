@@ -186,6 +186,9 @@ func postAddMultiDirCmdSandbox(t *testing.T) (home, projectRoot string) {
 		filepath.Join(projectRoot, ".git", "info", "exclude"),
 		[]byte(".claude/\n.cursor/\n"), 0o644))
 	require.Equal(t, 0, run([]string{"add", projectRoot}))
+	for _, dir := range []string{".claude", ".cursor"} {
+		makeLegacySymlink(t, home, projectRoot, dir)
+	}
 	return home, projectRoot
 }
 

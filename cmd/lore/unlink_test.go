@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/nathanclairmonte/lore/internal/git"
+	"github.com/nathanclairmonte/lore/internal/reconcile"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,7 +18,31 @@ func postAddCmdSandbox(t *testing.T) (home, projectRoot string) {
 	t.Helper()
 	home, projectRoot = addCmdSandbox(t)
 	require.Equal(t, 0, run([]string{"add", projectRoot}))
+	makeLegacySymlink(t, home, projectRoot, ".claude")
 	return home, projectRoot
+}
+
+func makeLegacySymlink(t *testing.T, home, projectRoot, dirName string) {
+	makeLegacySymlinkFor(t, home, projectRoot, "my-app", dirName)
+}
+
+func makeLegacySymlinkFor(t *testing.T, home, projectRoot, projectName, dirName string) {
+	t.Helper()
+	projectCopy := filepath.Join(projectRoot, dirName)
+	require.NoError(t, os.RemoveAll(projectCopy))
+	require.NoError(t, os.Symlink(
+		filepath.Join(home, "agent-context", "projects", projectName, dirName), projectCopy))
+}
+
+func addLegacySecondDir(t *testing.T, home, projectRoot string) {
+	t.Helper()
+	require.NoError(t, os.Remove(filepath.Join(projectRoot, ".claude")))
+	require.NoError(t, reconcile.CopyTree(
+		filepath.Join(home, "agent-context", "projects", "my-app", ".claude"),
+		filepath.Join(projectRoot, ".claude")))
+	require.Equal(t, 0, run([]string{"add", "--dir", ".cursor", projectRoot}))
+	makeLegacySymlink(t, home, projectRoot, ".claude")
+	makeLegacySymlink(t, home, projectRoot, ".cursor")
 }
 
 func TestLoreUnlink_HappyPathSingleDir(t *testing.T) {
@@ -122,7 +147,7 @@ func TestLoreUnlink_MultiDirHappyPath(t *testing.T) {
 	require.NoError(t, os.WriteFile(
 		filepath.Join(projectRoot, ".git", "info", "exclude"),
 		[]byte(".claude/\n.cursor/\n"), 0o644))
-	require.Equal(t, 0, run([]string{"add", "--dir", ".cursor", projectRoot}))
+	addLegacySecondDir(t, home, projectRoot)
 
 	// both should disappear in a single unlink.
 	require.Equal(t, 0, run([]string{"unlink", "my-app"}))
@@ -138,7 +163,7 @@ func TestLoreUnlink_MultiDirHappyPath(t *testing.T) {
 }
 
 func TestLoreUnlink_MultiDirPartialFailureRollsBack(t *testing.T) {
-	_, projectRoot := postAddCmdSandbox(t)
+	home, projectRoot := postAddCmdSandbox(t)
 
 	// add second agent dir.
 	require.NoError(t, os.Mkdir(filepath.Join(projectRoot, ".cursor"), 0o755))
@@ -148,7 +173,7 @@ func TestLoreUnlink_MultiDirPartialFailureRollsBack(t *testing.T) {
 	require.NoError(t, os.WriteFile(
 		filepath.Join(projectRoot, ".git", "info", "exclude"),
 		[]byte(".claude/\n.cursor/\n"), 0o644))
-	require.Equal(t, 0, run([]string{"add", "--dir", ".cursor", projectRoot}))
+	addLegacySecondDir(t, home, projectRoot)
 
 	// pre-flight sees .claude as a valid symlink and .cursor as
 	// drift B (real dir): refuse the whole project, don't remove
@@ -172,7 +197,7 @@ func TestLoreUnlink_MultiDirAggregatesRefusals(t *testing.T) {
 	// when two dirs each have a drift problem, the renderer must
 	// surface BOTH in a single run rather than dripping them out
 	// across repeat invocations.
-	_, projectRoot := postAddCmdSandbox(t)
+	home, projectRoot := postAddCmdSandbox(t)
 
 	require.NoError(t, os.Mkdir(filepath.Join(projectRoot, ".cursor"), 0o755))
 	require.NoError(t, os.WriteFile(
@@ -181,7 +206,7 @@ func TestLoreUnlink_MultiDirAggregatesRefusals(t *testing.T) {
 	require.NoError(t, os.WriteFile(
 		filepath.Join(projectRoot, ".git", "info", "exclude"),
 		[]byte(".claude/\n.cursor/\n"), 0o644))
-	require.Equal(t, 0, run([]string{"add", "--dir", ".cursor", projectRoot}))
+	addLegacySecondDir(t, home, projectRoot)
 
 	// drift B on both .claude and .cursor: replace each symlink with
 	// a real directory.
@@ -217,6 +242,7 @@ func TestLoreUnlink_All(t *testing.T) {
 		filepath.Join(secondRoot, ".git", "info", "exclude"),
 		[]byte(".claude/\n"), 0o644))
 	require.Equal(t, 0, run([]string{"add", secondRoot}))
+	makeLegacySymlinkFor(t, home, secondRoot, "second-app", ".claude")
 
 	require.Equal(t, 0, run([]string{"unlink", "--all"}))
 
@@ -248,6 +274,7 @@ func TestLoreUnlink_AllContinuesPastRefusal(t *testing.T) {
 		filepath.Join(secondRoot, ".git", "info", "exclude"),
 		[]byte(".claude/\n"), 0o644))
 	require.Equal(t, 0, run([]string{"add", secondRoot}))
+	makeLegacySymlinkFor(t, home, secondRoot, "second-app", ".claude")
 
 	// drift B on my-app: real dir instead of symlink.
 	claudePath := filepath.Join(projectRoot, ".claude")
