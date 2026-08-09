@@ -15,11 +15,11 @@ func newAddCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "add [path]",
-		Short: "Move a project's agent directories into the central repo and link them back",
-		Long: `Onboards a project: detects its agent directories, moves each
-into the central repo at projects/<name>/<dir>/, plants an
-absolute symlink back at the original location, records the
-paths locally, and commits using commit.add_template.
+		Short: "Copy a project's agent directories into the central repo",
+		Long: `Onboards a project: detects its agent directories, copies each
+into the central repo at projects/<name>/<dir>/, leaves the real
+project copy in place, records the checkout and sync-base locally,
+and commits using commit.add_template.
 
 When the project root contains multiple agent dirs (e.g. both
 .claude/ and .cursor/), all are tracked by default. Use --dir
@@ -86,6 +86,8 @@ func addResultForOutput(r project.AddResult) output.AddResult {
 		ProjectPath:       r.ProjectPath,
 		CentralRepo:       r.CentralRepo,
 		CommitMessage:     r.CommitMessage,
+		CommitSHA:         r.CommitSHA,
+		SyncBase:          r.SyncBase,
 		Dirs:              dirs,
 		ScaffoldRequested: r.ScaffoldRequested,
 	}

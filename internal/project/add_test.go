@@ -1,6 +1,7 @@
 package project
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/nathanclairmonte/lore/internal/git"
 	"github.com/nathanclairmonte/lore/internal/link"
 	"github.com/nathanclairmonte/lore/internal/prompt"
+	"github.com/nathanclairmonte/lore/internal/reconcile"
 	"github.com/nathanclairmonte/lore/internal/state"
 	"github.com/stretchr/testify/require"
 )
@@ -121,7 +123,9 @@ func TestAddHappyPath(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, "my-app", res.ProjectName)
-	require.Equal(t, projectRoot, res.ProjectPath)
+	resolvedProjectRoot, err := filepath.EvalSymlinks(projectRoot)
+	require.NoError(t, err)
+	require.Equal(t, resolvedProjectRoot, res.ProjectPath)
 	require.Equal(t, centralPath, res.CentralRepo)
 	require.Equal(t, "feat: add my-app", res.CommitMessage)
 	require.False(t, res.AllAlreadyTracked())
@@ -133,10 +137,12 @@ func TestAddHappyPath(t *testing.T) {
 		filepath.Join(centralPath, "projects", "my-app", ".claude"),
 		res.Dirs[0].CentralPath)
 
-	// symlink is in place and points where we expect.
-	require.NoError(t, link.Validate(
-		filepath.Join(projectRoot, ".claude"),
-		res.Dirs[0].CentralPath))
+	projectInfo, err := os.Lstat(filepath.Join(projectRoot, ".claude"))
+	require.NoError(t, err)
+	require.Zero(t, projectInfo.Mode()&os.ModeSymlink)
+	equal, err := reconcile.TreesEqual(filepath.Join(projectRoot, ".claude"), res.Dirs[0].CentralPath)
+	require.NoError(t, err)
+	require.True(t, equal)
 
 	// central contents survived the move.
 	require.FileExists(t, filepath.Join(res.Dirs[0].CentralPath, "CLAUDE.md"))
@@ -146,13 +152,27 @@ func TestAddHappyPath(t *testing.T) {
 	require.NoError(t, err)
 	entry, ok := st.ProjectEntryFor("my-app")
 	require.True(t, ok)
-	require.Equal(t, projectRoot, entry.Path)
+	require.Equal(t, resolvedProjectRoot, entry.Checkouts[0].Path)
 	require.Equal(t, []string{".claude"}, entry.AgentDirs)
+	require.Equal(t, res.SyncBase, entry.Checkouts[0].SyncBase)
+	require.Equal(t, res.CommitSHA, res.SyncBase)
 
 	// commit landed on central with the templated message.
 	msg, err := git.Run(centralPath, "log", "-1", "--pretty=%s")
 	require.NoError(t, err)
 	require.Equal(t, "feat: add my-app", msg)
+}
+
+func TestAddRejectsDirOutsideProjectRoot(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	sibling := filepath.Join(filepath.Dir(projectRoot), "sibling")
+	require.NoError(t, os.MkdirAll(sibling, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sibling, "AGENTS.md"), []byte("context"), 0o644))
+
+	_, err := Add(AddOptions{ProjectPath: projectRoot, Dirs: []string{"../sibling"}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must not contain a path separator")
+	require.NoDirExists(t, filepath.Join(centralPath, "projects", "sibling"))
 }
 
 func TestAddRefusesWhenNotGitignoredAndNoTTY(t *testing.T) {
@@ -189,19 +209,19 @@ func TestAddPickerWritesRepoGitignoreAndProceeds(t *testing.T) {
 
 	// .gitignore at repo root got the entry. Leading slash (slice-5
 	// followup fold-in) anchors the pattern to the repo root rather
-	// than matching .claude/ inside arbitrary subdirs. No trailing slash
-	// because the post-move symlink wouldn't match a dir-only pattern.
+	// than matching .claude/ inside arbitrary subdirs.
 	got, err := os.ReadFile(filepath.Join(projectRoot, ".gitignore"))
 	require.NoError(t, err)
-	require.Equal(t, "/.claude\n", string(got))
+	require.Equal(t, "/.claude/\n", string(got))
 
-	// the rest of Add ran: central + symlink + state + commit.
+	// the rest of Add ran: central copy, state, and commit.
 	require.Len(t, res.Dirs, 1)
 	require.Equal(t,
 		filepath.Join(centralPath, "projects", "my-app", ".claude"),
 		res.Dirs[0].CentralPath)
-	require.NoError(t, link.Validate(
-		filepath.Join(projectRoot, ".claude"), res.Dirs[0].CentralPath))
+	equal, err := reconcile.TreesEqual(filepath.Join(projectRoot, ".claude"), res.Dirs[0].CentralPath)
+	require.NoError(t, err)
+	require.True(t, equal)
 }
 
 func TestAddPickerWritesGlobalExcludesAndProceeds(t *testing.T) {
@@ -222,7 +242,7 @@ func TestAddPickerWritesGlobalExcludesAndProceeds(t *testing.T) {
 	require.NotEmpty(t, xdg)
 	got, err := os.ReadFile(filepath.Join(xdg, "git", "ignore"))
 	require.NoError(t, err, "global excludes file should have been created")
-	require.Equal(t, ".claude\n", string(got))
+	require.Equal(t, ".claude/\n", string(got))
 }
 
 func TestAddPickerWritesRepoExcludeAndProceeds(t *testing.T) {
@@ -240,7 +260,7 @@ func TestAddPickerWritesRepoExcludeAndProceeds(t *testing.T) {
 	// pattern to the repo root, same policy as the repo .gitignore case.
 	got, err := os.ReadFile(filepath.Join(projectRoot, ".git", "info", "exclude"))
 	require.NoError(t, err)
-	require.Equal(t, "/.claude\n", string(got))
+	require.Equal(t, "/.claude/\n", string(got))
 }
 
 func TestAddPickerDismissAbortsWithNoSideEffects(t *testing.T) {
@@ -358,7 +378,7 @@ func TestAddPickerWritesToRepoToplevelForMonorepoSubdir(t *testing.T) {
 	// file's directory; the relative path scopes to the subdir.
 	gotRoot, err := os.ReadFile(filepath.Join(repoRoot, ".gitignore"))
 	require.NoError(t, err)
-	require.Equal(t, "/services/foo/.claude\n", string(gotRoot))
+	require.Equal(t, "/services/foo/.claude/\n", string(gotRoot))
 	_, subStatErr := os.Stat(filepath.Join(subProject, ".gitignore"))
 	require.True(t, os.IsNotExist(subStatErr),
 		"no stray .gitignore at the subdir level")
@@ -420,20 +440,30 @@ func TestAddIdempotentReRun(t *testing.T) {
 	require.Empty(t, second.CommitMessage, "no commit fires on idempotent re-run")
 }
 
-func TestAddDriftedStateConflicts(t *testing.T) {
+func TestAddRerunIgnoresProjectCopyChanges(t *testing.T) {
 	_, projectRoot := addSandbox(t)
 
 	_, err := Add(AddOptions{ProjectPath: projectRoot})
 	require.NoError(t, err)
 
-	// simulate drift: user manually removes the symlink. state still
-	// claims the project is tracked, so the next add must surface this
-	// as a conflict rather than silently no-op or re-onboard.
-	require.NoError(t, link.Remove(filepath.Join(projectRoot, ".claude")))
+	// content drift belongs to push and pull. add remains a no-op.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".claude", "CLAUDE.md"), []byte("changed"), 0o644))
+
+	result, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.True(t, result.AllAlreadyTracked())
+}
+
+func TestAddRerunReportsMissingProjectCopyAsUnhealthy(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(filepath.Join(projectRoot, ".claude")))
 
 	_, err = Add(AddOptions{ProjectPath: projectRoot})
 	require.Error(t, err)
-	require.Equal(t, lerr.CodeConflict, lerr.CodeOf(err))
+	require.Equal(t, lerr.CodeInconsistency, lerr.CodeOf(err))
 }
 
 func TestAddUsesCwdWhenPathEmpty(t *testing.T) {
@@ -460,7 +490,9 @@ func TestAddResolvesSymlinkInProjectPath(t *testing.T) {
 
 	res, err := Add(AddOptions{ProjectPath: linkAtTop})
 	require.NoError(t, err)
-	require.Equal(t, projectRoot, res.ProjectPath,
+	resolvedProjectRoot, err := filepath.EvalSymlinks(projectRoot)
+	require.NoError(t, err)
+	require.Equal(t, resolvedProjectRoot, res.ProjectPath,
 		"state must store the symlink-resolved path, not the alias")
 }
 
@@ -927,7 +959,9 @@ func TestAddNameOverride(t *testing.T) {
 	require.NoError(t, err)
 	entry, ok := st.ProjectEntryFor("foo-alt")
 	require.True(t, ok)
-	require.Equal(t, projectRoot, entry.Path)
+	resolvedProjectRoot, err := filepath.EvalSymlinks(projectRoot)
+	require.NoError(t, err)
+	require.Equal(t, resolvedProjectRoot, entry.Checkouts[0].Path)
 }
 
 func TestAddNameStateDriftConflict(t *testing.T) {
@@ -951,8 +985,7 @@ func TestAddNameStateDriftConflict(t *testing.T) {
 	_, err = Add(AddOptions{ProjectPath: other})
 	require.Error(t, err)
 	require.Equal(t, lerr.CodeConflict, lerr.CodeOf(err))
-	require.Contains(t, err.Error(), "use --name",
-		"drift message must point the user at --name")
+	require.Contains(t, err.Error(), "differs from central")
 }
 
 func TestAddCentralOrphanConflict(t *testing.T) {
@@ -982,8 +1015,152 @@ func TestAddCentralOrphanConflict(t *testing.T) {
 	require.Equal(t, lerr.CodeConflict, lerr.CodeOf(err))
 	require.Contains(t, err.Error(), "central",
 		"orphan message must mention central")
-	require.Contains(t, err.Error(), "lore use",
-		"orphan message must mention lore use as the adoption path")
+	require.Contains(t, err.Error(), "differs from central")
+}
+
+func TestAddAdoptsIdenticalCopiesAfterStateLoss(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	first, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	statePath, err := state.Path()
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(statePath))
+
+	result, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.Empty(t, result.CommitMessage)
+	require.Equal(t, first.SyncBase, result.SyncBase)
+	require.Equal(t, StatusAdopted, result.Dirs[0].Status)
+	count, err := git.Run(centralPath, "rev-list", "--count", "HEAD")
+	require.NoError(t, err)
+	require.Equal(t, "2", count)
+}
+
+func TestAddRefusesExtensionWhenExistingCopyDiffers(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".claude", "CLAUDE.md"), []byte("changed"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(projectRoot, ".cursor"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".cursor", "rules.md"), []byte("rules"), 0o644))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".git", "info", "exclude"), []byte(".claude/\n.cursor/\n"), 0o644))
+
+	_, err = Add(AddOptions{ProjectPath: projectRoot, Dirs: []string{".cursor"}})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
+	require.NoDirExists(t, filepath.Join(centralPath, "projects", "my-app", ".cursor"))
+}
+
+func TestAddRefusesExtensionWhenMatchingCentralCopyIsUncommitted(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	first, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+
+	changed := []byte("matching but uncommitted")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".claude", "CLAUDE.md"), changed, 0o644))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(centralPath, "projects", "my-app", ".claude", "CLAUDE.md"), changed, 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(projectRoot, ".cursor"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".cursor", "rules.md"), []byte("rules"), 0o644))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".git", "info", "exclude"), []byte(".claude/\n.cursor/\n"), 0o644))
+
+	_, err = Add(AddOptions{ProjectPath: projectRoot, Dirs: []string{".cursor"}})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
+	require.Contains(t, err.Error(), "uncommitted central changes")
+	require.NoDirExists(t, filepath.Join(centralPath, "projects", "my-app", ".cursor"))
+
+	st, _, err := state.Load()
+	require.NoError(t, err)
+	canonicalProjectRoot, err := filepath.EvalSymlinks(projectRoot)
+	require.NoError(t, err)
+	checkout, ok := st.CheckoutForPath("my-app", canonicalProjectRoot)
+	require.True(t, ok)
+	require.Equal(t, first.SyncBase, checkout.SyncBase)
+}
+
+func TestAddCommitDoesNotIncludeUnrelatedStagedChanges(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	unrelated := filepath.Join(centralPath, "notes.txt")
+	require.NoError(t, os.WriteFile(unrelated, []byte("keep staged"), 0o644))
+	_, err := git.Run(centralPath, "add", "notes.txt")
+	require.NoError(t, err)
+
+	_, err = Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	committed, err := git.Run(centralPath, "show", "--pretty=", "--name-only", "HEAD")
+	require.NoError(t, err)
+	require.NotContains(t, committed, "notes.txt")
+	staged, err := git.Run(centralPath, "diff", "--cached", "--name-only")
+	require.NoError(t, err)
+	require.Equal(t, "notes.txt", staged)
+}
+
+func TestAddKeepsCommitWhenStateSaveFailsAndRetryAdopts(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	originalSave := saveAddState
+	saveAddState = func(state.State) error { return errors.New("injected state failure") }
+	t.Cleanup(func() { saveAddState = originalSave })
+
+	result, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeInconsistency, lerr.CodeOf(err))
+	require.Len(t, result.CommitSHA, 40)
+	require.FileExists(t, filepath.Join(projectRoot, ".claude", "CLAUDE.md"))
+	require.FileExists(t, filepath.Join(centralPath, "projects", "my-app", ".claude", "CLAUDE.md"))
+	count, countErr := git.Run(centralPath, "rev-list", "--count", "HEAD")
+	require.NoError(t, countErr)
+	require.Equal(t, "2", count)
+
+	saveAddState = originalSave
+	retry, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.Equal(t, StatusAdopted, retry.Dirs[0].Status)
+	require.Equal(t, result.CommitSHA, retry.SyncBase)
+	count, countErr = git.Run(centralPath, "rev-list", "--count", "HEAD")
+	require.NoError(t, countErr)
+	require.Equal(t, "2", count)
+}
+
+func TestAddExtensionRetryAdvancesBaseToRecoveredCommit(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	first, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	require.NoError(t, os.Mkdir(filepath.Join(projectRoot, ".cursor"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".cursor", "rules.md"), []byte("rules"), 0o644))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, ".git", "info", "exclude"), []byte(".claude/\n.cursor/\n"), 0o644))
+
+	originalSave := saveAddState
+	saveAddState = func(state.State) error { return errors.New("injected state failure") }
+	_, err = Add(AddOptions{ProjectPath: projectRoot, Dirs: []string{".cursor"}})
+	require.Error(t, err)
+	saveAddState = originalSave
+	t.Cleanup(func() { saveAddState = originalSave })
+
+	recoveredHead, err := git.Run(centralPath, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	require.NotEqual(t, first.SyncBase, recoveredHead)
+
+	retry, err := Add(AddOptions{ProjectPath: projectRoot, Dirs: []string{".cursor"}})
+	require.NoError(t, err)
+	require.Equal(t, recoveredHead, retry.SyncBase)
+	require.Equal(t, StatusAdopted, retry.Dirs[0].Status)
+
+	st, _, err := state.Load()
+	require.NoError(t, err)
+	canonicalProjectRoot, err := filepath.EvalSymlinks(projectRoot)
+	require.NoError(t, err)
+	checkout, ok := st.CheckoutForPath("my-app", canonicalProjectRoot)
+	require.True(t, ok)
+	require.Equal(t, recoveredHead, checkout.SyncBase)
 }
 
 func TestAddCreateWithDirScaffoldsAndProceeds(t *testing.T) {

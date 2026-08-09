@@ -1,7 +1,5 @@
 // Package project orchestrates the multi-step use cases behind lore's
-// project subcommands (add, path, and in later slices rm/mv/unlink/link).
-// It composes the deep modules - config, state, central, git, detect,
-// link - so the cmd/lore/* files stay thin Cobra adapters.
+// project subcommands. It composes the domain modules so command adapters stay thin.
 package project
 
 import (
@@ -17,8 +15,6 @@ import (
 	"github.com/nathanclairmonte/lore/internal/detect"
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/git"
-	"github.com/nathanclairmonte/lore/internal/link"
-	"github.com/nathanclairmonte/lore/internal/output"
 	"github.com/nathanclairmonte/lore/internal/prompt"
 	"github.com/nathanclairmonte/lore/internal/state"
 )
@@ -40,6 +36,8 @@ const (
 	// this run AND the normal add flow succeeded on it. Idempotent
 	// re-creates (dir already existed) report as StatusAdded instead.
 	StatusScaffolded DirStatus = "scaffolded"
+	// StatusAdopted is set when identical existing copies rebuild tracking.
+	StatusAdopted DirStatus = "adopted"
 )
 
 // AgentDirResult is the per-dir outcome inside an AddResult.
@@ -57,6 +55,8 @@ type AddResult struct {
 	ProjectPath   string // resolved, absolute
 	CentralRepo   string // central repo root (for the Next hint)
 	CommitMessage string // empty when nothing was newly added
+	CommitSHA     string // full central commit SHA used as the sync-base
+	SyncBase      string // checkout sync-base after this operation
 	Dirs          []AgentDirResult
 	// ScaffoldRequested is true when the user passed --create. Carried
 	// even when no scaffolding actually happened (all targets already
@@ -101,382 +101,6 @@ func (r AddResult) AllAlreadyTracked() bool {
 // `opts.Dirs` scopes which agent dirs to handle; an empty slice means
 // "all detected agent dirs at the project root plus any already tracked
 // in central".
-func Add(opts AddOptions) (AddResult, error) {
-	projectPath, err := resolveProjectPath(opts.ProjectPath)
-	if err != nil {
-		return AddResult{}, err
-	}
-
-	cfg, _, err := config.Load()
-	if err != nil {
-		return AddResult{}, err
-	}
-
-	st, _, err := state.Load()
-	if err != nil {
-		return AddResult{}, err
-	}
-
-	c, err := central.Open(cfg.CentralRepo)
-	if err != nil {
-		// surface central-not-set-up as setup-missing so the user sees
-		// the right exit code class.
-		if lerr.CodeOf(err) == lerr.CodeNotFound {
-			return AddResult{}, lerr.Newf(lerr.CodeSetupMissing,
-				"central repo not found at %s", config.Contract(cfg.CentralRepo)).
-				WithHint("run `lore init` first")
-		}
-		return AddResult{}, err
-	}
-
-	projectName := opts.Name
-	nameSource := "--name"
-	if projectName == "" {
-		projectName = filepath.Base(projectPath)
-		nameSource = "project path basename"
-	}
-	if err := ValidateProjectName(projectName, nameSource); err != nil {
-		return AddResult{}, err
-	}
-
-	trackedEntry, isTracked := st.ProjectEntryFor(projectName)
-	if isTracked && trackedEntry.Path != projectPath {
-		// drift check: same project name pointing at a different path is
-		// a conflict the orchestrator can't silently resolve. Catch it
-		// before any per-dir work so the user sees the cleanest error.
-		return AddResult{}, lerr.Newf(lerr.CodeConflict,
-			"project %q is already tracked at %s; use --name <alternative> to track this project under a different name",
-			projectName, config.Contract(trackedEntry.Path))
-	}
-
-	// central-orphan probe: name not in this machine's state but the
-	// dir already exists in central. happens on a fresh machine pointed
-	// at an existing central repo, or after the user nuked their local
-	// state. without this gate, the next central.AddAgentDir call would
-	// land into an already-occupied projects/<name>/ and silently merge
-	// histories under a misleading project label.
-	if !isTracked {
-		orphan, err := centralProjectDirExists(c, projectName)
-		if err != nil {
-			return AddResult{}, err
-		}
-		if orphan {
-			return AddResult{}, lerr.Newf(lerr.CodeConflict,
-				"name %q already exists in central but isn't tracked on this machine; use --name <alternative>, or run `lore use %s` to adopt it",
-				projectName, projectName)
-		}
-	}
-
-	// success-gated unwind covering every per-dir side effect this run
-	// produces. each step registers its own undo closure; on failure the
-	// list is drained LIFO so unwind order is the reverse of side-effect
-	// order. central, link, state are reverted; the commit at the end is
-	// the success boundary. Scoped here (rather than later in the
-	// function) so the --create scaffold step below can also register
-	// rollbacks: a fresh scaffold should be removed if any subsequent
-	// step (gitignore picker dismissal, safety refusal, central write
-	// failure) aborts the run.
-	success := false
-	var rollbacks []func()
-	defer func() {
-		if success {
-			return
-		}
-		for i := len(rollbacks) - 1; i >= 0; i-- {
-			rollbacks[i]()
-		}
-	}()
-
-	// --create pre-step: scaffold requested agent dirs (if any are
-	// missing) before DetectAgentDirs runs. Detection then finds the
-	// freshly-scaffolded dirs alongside any pre-existing ones, and
-	// downstream selection/safety/picker/onboard flow is unchanged.
-	// Errors here (target exists as a file, picker dismissal in
-	// interactive mode, permission denied) abort BEFORE any central or
-	// state writes happen. Successful scaffolds register a rollback that
-	// removes the freshly-created dir on any later failure: a partial
-	// multi-dir scaffold rolls back earlier dirs, and a downstream
-	// picker dismissal rolls back the scaffold that just landed.
-	scaffoldedSet := map[string]bool{}
-	if opts.Create {
-		choices, err := scaffoldChoicesFromOptions(opts.Dirs, cfg.AgentDirs)
-		if err != nil {
-			return AddResult{}, err
-		}
-		for _, choice := range choices {
-			created, err := scaffoldAgentDir(projectPath, choice.DirName, choice.FileName)
-			if err != nil {
-				return AddResult{}, err
-			}
-			if created {
-				scaffoldedSet[choice.DirName] = true
-				scaffoldedPath := filepath.Join(projectPath, choice.DirName)
-				rollbacks = append(rollbacks, func() {
-					// RemoveAll because the dir contains the starter file
-					// we wrote; safe because we know exactly what we put
-					// there and the rollback window is the same goroutine
-					// with no concurrent writers.
-					if rmErr := os.RemoveAll(scaffoldedPath); rmErr != nil {
-						fmt.Fprintf(os.Stderr,
-							"warning: cannot remove scaffolded %s during rollback: %v\n",
-							scaffoldedPath, rmErr)
-					}
-				})
-				output.Success("Scaffolded %s/ with empty %s", choice.DirName, choice.FileName)
-			} else {
-				output.Hint("%s already exists; skipping scaffold", choice.DirName)
-			}
-		}
-	}
-
-	detected, err := detect.DetectAgentDirs(projectPath, cfg.AgentDirs)
-	if err != nil {
-		return AddResult{}, err
-	}
-
-	// surface bare-symlink candidates that DetectAgentDirs skipped:
-	// slice-3 safety cases (a stale .claude symlink the user left around
-	// but lore hasn't onboarded). without this, an untracked symlinked
-	// candidate would silently produce a "no agent directory found"
-	// instead of the proper safety refusal. resolveSelection ignores the
-	// result in --dir mode, so the Lstat work is unused there, but the
-	// candidate list is small and the gate's not worth a cross-function
-	// invariant.
-	symlinkedNames, err := untrackedSymlinkCandidates(projectPath, cfg.AgentDirs, trackedEntry.AgentDirs)
-	if err != nil {
-		return AddResult{}, err
-	}
-
-	selectedNames, err := resolveSelection(opts.Dirs, detected, trackedEntry.AgentDirs, symlinkedNames)
-	if err != nil {
-		return AddResult{}, err
-	}
-	if len(selectedNames) == 0 {
-		// no --dir and no detected dirs and no tracked dirs - nothing to do.
-		return AddResult{}, lerr.Newf(lerr.CodeNotFound,
-			"no agent directory found at %s (looked for: %s)",
-			config.Contract(projectPath), strings.Join(cfg.AgentDirs, ", ")).
-			WithHint("pass --create to scaffold an empty agent dir, or create one manually and rerun")
-	}
-
-	// classify each selected name into one of three buckets: already
-	// tracked (validate symlink), candidate for onboarding (validate
-	// it's a real dir on disk), or hard-error (missing).
-	var alreadyTracked []string
-	var toCheck []detect.AgentDir
-	for _, name := range selectedNames {
-		if slices.Contains(trackedEntry.AgentDirs, name) {
-			expectedTarget := c.ProjectPath(projectName, name)
-			linkPath := filepath.Join(projectPath, name)
-			if validErr := link.Validate(linkPath, expectedTarget); validErr != nil {
-				return AddResult{}, lerr.Newf(lerr.CodeConflict,
-					"state says %q's %s is tracked but the symlink at %s does not point to %s",
-					projectName, name, linkPath, expectedTarget).
-					WithHint("remove the stale symlink and re-run, or run `lore doctor` once it ships")
-			}
-			alreadyTracked = append(alreadyTracked, name)
-			continue
-		}
-		path := filepath.Join(projectPath, name)
-		info, statErr := os.Lstat(path)
-		if statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				return AddResult{}, missingDirError(name, projectPath, detected, trackedEntry.AgentDirs)
-			}
-			return AddResult{}, lerr.Wrap(lerr.CodeGenericError, statErr,
-				fmt.Sprintf("cannot stat %s", path))
-		}
-		if info.Mode()&os.ModeSymlink == 0 && !info.IsDir() {
-			// regular file at this name. user-explicit --dir was unambiguous,
-			// so surface as a not-found rather than silently skipping.
-			return AddResult{}, missingDirError(name, projectPath, detected, trackedEntry.AgentDirs)
-		}
-		// either a real dir (the normal case) or a symlink (slice-3
-		// safety case). CheckSafetyAll handles both: symlinks produce
-		// the AgentDirSymlink violation; real dirs go through the
-		// tracked-file + nested-.git checks.
-		toCheck = append(toCheck, detect.AgentDir{Name: name, Path: path})
-	}
-
-	// per-candidate safety. violations partition toCheck into the
-	// to-onboard set (no violations) and the skipped set (one or more).
-	violationsByDir, err := detect.CheckSafetyAll(projectPath, namesOf(toCheck))
-	if err != nil {
-		return AddResult{}, err
-	}
-	var toOnboard []detect.AgentDir
-	var skipped []AgentDirResult
-	for _, d := range toCheck {
-		if vs, hit := violationsByDir[d.Name]; hit && len(vs) > 0 {
-			skipped = append(skipped, AgentDirResult{
-				Name:       d.Name,
-				Status:     StatusSkippedSafety,
-				Violations: vs,
-			})
-			continue
-		}
-		toOnboard = append(toOnboard, d)
-	}
-
-	// gitignore precheck + picker, per dir. all writes here land BEFORE
-	// the success-gated unwind region: a picker dismissal or a write
-	// failure aborts the whole run without any central / state / commit
-	// side effects landing.
-	//
-	// Asymmetry vs. safety violations is deliberate: a safety violation
-	// on dir B lets dir A proceed (it's a mechanical refusal), but a
-	// picker dismissal on dir B aborts the whole run (it's an active
-	// "no" from the user). Earlier picker writes are NOT rewound on
-	// abort: the .gitignore entry the user actively chose for dir A is
-	// already a correct decision they made, and retrying after fixing
-	// the dismissed dir shouldn't re-prompt them for choices they've
-	// already made. The .gitignore file is also user-owned; treating
-	// edits to it as lore-reversible side effects overclaims ownership.
-	var repoTop string
-	for _, d := range toOnboard {
-		ignored, err := git.CheckIgnore(projectPath, d.Name)
-		if err != nil {
-			return AddResult{}, err
-		}
-		if ignored {
-			continue
-		}
-		// fail fast on non-git projects BEFORE the picker fires. CheckIgnore
-		// folds not-a-repo into "not ignored", so without this gate a
-		// non-git project would land in the picker, write to disk, and only
-		// fail on re-verify - leaving stray .gitignore / global-excludes
-		// pollution behind. Resolved once and reused; RepoToplevel is the
-		// same answer for every dir at this project root.
-		if repoTop == "" {
-			repoTop, err = git.RepoToplevel(projectPath)
-			if err != nil {
-				return AddResult{}, err
-			}
-		}
-
-		target, err := pickGitignoreTarget(d.Name)
-		if err != nil {
-			return AddResult{}, err
-		}
-		targetPath, err := resolveGitignoreTarget(target, repoTop)
-		if err != nil {
-			return AddResult{}, err
-		}
-		pattern := ignorePatternFor(target, d.Name, projectPath, repoTop)
-		if err := git.AppendIgnoreEntry(targetPath, pattern); err != nil {
-			return AddResult{}, err
-		}
-		// re-verify via check-ignore: source of truth for "is it ignored",
-		// catches a wrong-target write (e.g. user has a stale
-		// core.excludesFile pointing somewhere git no longer reads).
-		ignored, err = git.CheckIgnore(projectPath, d.Name)
-		if err != nil {
-			return AddResult{}, err
-		}
-		if !ignored {
-			return AddResult{}, lerr.Newf(lerr.CodeInconsistency,
-				"wrote %s to %s but git check-ignore still reports it as not ignored",
-				d.Name, config.Contract(targetPath)).
-				WithHint("check git's gitignore precedence (`git check-ignore -v` against the dir) and fix the conflict")
-		}
-		output.Success("added %s to %s", pattern, config.Contract(targetPath))
-	}
-
-	// per-dir onboard. each successful step appends an undo closure to
-	// the rollbacks slice declared earlier (above the --create step);
-	// the deferred drain runs them LIFO on any failure before this
-	// function returns.
-	addedDirs := make([]AgentDirResult, 0, len(toOnboard))
-	for _, d := range toOnboard {
-		destPath, undo, err := c.AddAgentDir(projectName, d.Name, d.Path)
-		if err != nil {
-			return AddResult{}, err
-		}
-		rollbacks = append(rollbacks, func() {
-			if undoErr := undo(); undoErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: %v\n", undoErr)
-			}
-		})
-
-		if err := link.Create(destPath, d.Path); err != nil {
-			return AddResult{}, err
-		}
-		linkPath := d.Path
-		rollbacks = append(rollbacks, func() { _ = link.Remove(linkPath) })
-
-		if err := st.AddAgentDir(projectName, projectPath, d.Name); err != nil {
-			return AddResult{}, err
-		}
-		dirName := d.Name
-		rollbacks = append(rollbacks, func() {
-			st.RemoveAgentDir(projectName, dirName)
-		})
-
-		status := StatusAdded
-		if scaffoldedSet[d.Name] {
-			status = StatusScaffolded
-		}
-		addedDirs = append(addedDirs, AgentDirResult{
-			Name:        d.Name,
-			Status:      status,
-			CentralPath: destPath,
-		})
-	}
-
-	commitMessage := ""
-	if len(toOnboard) > 0 {
-		// state.Save and the commit are the LAST two side effects of the
-		// run, so their unwind is registered here rather than per-dir.
-		// the in-memory st mutations above are reverted by the per-dir
-		// rollbacks; this Save persists them to disk, after which a
-		// Commit failure needs both the in-memory revert AND a re-Save
-		// to put the file back to its pre-run shape.
-		if err := state.Save(st); err != nil {
-			return AddResult{}, err
-		}
-		rollbacks = append(rollbacks, func() {
-			if saveErr := state.Save(st); saveErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: cannot revert state file: %v\n", saveErr)
-			}
-		})
-
-		commitMessage = renderAddTemplate(cfg.Commit.AddTemplate, projectName, namesOf(toOnboard))
-		if err := c.Commit(commitMessage); err != nil {
-			return AddResult{}, err
-		}
-	}
-	success = true
-
-	// build the per-dir result list. order: already-tracked first (stable
-	// reporting of state that pre-dated this run), then this run's added
-	// dirs, then skipped. each section preserves the discovery order from
-	// upstream so the user sees a deterministic listing across runs.
-	allDirs := make([]AgentDirResult, 0, len(alreadyTracked)+len(addedDirs)+len(skipped))
-	for _, name := range alreadyTracked {
-		allDirs = append(allDirs, AgentDirResult{
-			Name:        name,
-			Status:      StatusAlreadyTracked,
-			CentralPath: c.ProjectPath(projectName, name),
-		})
-	}
-	allDirs = append(allDirs, addedDirs...)
-	allDirs = append(allDirs, skipped...)
-
-	result := AddResult{
-		ProjectName:       projectName,
-		ProjectPath:       projectPath,
-		CentralRepo:       c.Path,
-		CommitMessage:     commitMessage,
-		Dirs:              allDirs,
-		ScaffoldRequested: opts.Create,
-	}
-
-	if len(skipped) > 0 {
-		return result, buildSafetyError(skipped)
-	}
-	return result, nil
-}
-
 // Path returns the absolute on-disk path of an agent directory tracked
 // for projectName inside the central repo. When dirName is empty:
 // returns the single tracked dir's path, or CodeConflict if the project
@@ -582,6 +206,15 @@ func resolveSelection(requested []string, detected []detect.AgentDir, tracked, s
 		}
 	}
 	return out, nil
+}
+
+func validateAgentDirNames(names []string, source string) error {
+	for _, name := range names {
+		if err := validateScaffoldName(name, source); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // centralProjectDirExists reports whether central/projects/<name>/ is
@@ -794,9 +427,7 @@ func resolveGitignoreTarget(target prompt.GitignoreTarget, repoTop string) (stri
 // purpose of a machine-wide rule, which is to apply across every repo
 // on the user's machine regardless of path.
 //
-// No trailing slash on any variant: ".claude/" matches only directories,
-// which fails once lore replaces the directory with a symlink (the
-// symlink becomes visible to `git status` again).
+// a trailing slash limits the rule to the real directory lore manages.
 func ignorePatternFor(target prompt.GitignoreTarget, name, projectPath, repoTop string) string {
 	switch target {
 	case prompt.TargetRepoGitignore, prompt.TargetRepoExclude:
@@ -804,11 +435,11 @@ func ignorePatternFor(target prompt.GitignoreTarget, name, projectPath, repoTop 
 		// rel == "." when projectPath IS repoTop; treat the same as the
 		// monorepo-subdir case by collapsing to a bare leading-slash entry.
 		if err != nil || rel == "" || rel == "." {
-			return "/" + name
+			return "/" + name + "/"
 		}
-		return "/" + filepath.ToSlash(filepath.Join(rel, name))
+		return "/" + filepath.ToSlash(filepath.Join(rel, name)) + "/"
 	default:
-		return name
+		return name + "/"
 	}
 }
 
