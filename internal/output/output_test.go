@@ -212,6 +212,49 @@ func TestPrintPushReportsAdoptedCheckout(t *testing.T) {
 	require.Equal(t, "[ok] Advanced sync-base for 1 checkout(s)\n", out.String())
 }
 
+func samplePullResult() PullResult {
+	return PullResult{
+		CentralRepo:  "/home/u/agent-context",
+		CentralHead:  "89abcdef0123456789abcdef0123456789abcdef",
+		ScannedRoots: []string{},
+		Projects: []PullProjectResult{{
+			Name: "my-app", Status: "pulled", Matches: []string{}, Error: "",
+			Checkouts: []PullCheckoutResult{{
+				Path: "/home/u/code/my-app", Status: "updated",
+				SyncBase: "89abcdef0123456789abcdef0123456789abcdef", Error: "",
+				Dirs: []PullDirResult{{
+					Name: ".claude", Path: "/home/u/code/my-app/.claude",
+					Status: "updated", Unignored: false,
+				}},
+			}},
+		}},
+	}
+}
+
+func TestGolden_PrintPull_Human(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	PrintPull(samplePullResult())
+	assertGolden(t, "pull_human", out.String())
+}
+
+func TestGolden_PrintPull_JSON(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintPull(samplePullResult())
+	assertGolden(t, "pull_json", out.String())
+}
+
+func TestPrintPullReportsUnknownCheckoutStatus(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	PrintPull(PullResult{Projects: []PullProjectResult{{
+		Name: "my-app", Checkouts: []PullCheckoutResult{{
+			Path: "/home/u/code/my-app", Status: "future-status",
+		}},
+	}}})
+
+	require.Contains(t, out.String(), `unknown status "future-status"`)
+}
+
 // samplePartialAddResult covers the slice-5 partial-failure case: one
 // dir landed, one was refused for safety. golden locks the layout: the
 // added block renders normally, the skipped block follows with a "warn"
