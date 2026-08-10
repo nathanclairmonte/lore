@@ -373,18 +373,11 @@ func adoptCheckout(st state.State, c *central.Central, projectName, projectPath 
 }
 
 func requireCentralDirsAtHead(c *central.Central, projectName string, dirNames []string) error {
-	paths := make([]string, 0, len(dirNames))
-	for _, name := range dirNames {
-		paths = append(paths, filepath.Join("projects", projectName, name))
-	}
-	args := append([]string{
-		"status", "--porcelain", "--untracked-files=all", "--ignored=matching", "--",
-	}, paths...)
-	status, err := git.Run(c.Path, args...)
+	dirty, err := c.ScopedDirty(projectName, dirNames)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(status) != "" {
+	if dirty {
 		return lerr.Newf(lerr.CodeRefusedSafety,
 			"uncommitted central changes prevent a valid sync-base for %q", projectName).
 			WithHint("commit, stash, or discard the central changes, then re-run `lore add`")
