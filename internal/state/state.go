@@ -86,7 +86,7 @@ func Defaults() State {
 // Load reads the state file. If absent, returns Defaults() with
 // exists=false (nil err). Files at schema versions other than the
 // current one are rejected with CodeInconsistency; the user is expected
-// to remove the stale file (a future `lore link` will regenerate it).
+// to remove the stale file and rebuild current state with pull.
 func Load() (st State, exists bool, err error) {
 	path, err := Path()
 	if err != nil {
@@ -109,7 +109,7 @@ func Load() (st State, exists bool, err error) {
 		return State{}, false, lerr.Newf(lerr.CodeInconsistency,
 			"state file at %s is schema version %d, but this lore expects %d",
 			path, st.SchemaVersion, CurrentSchemaVersion).
-			WithHint("legacy symlink migration is handled by `lore pull --all`")
+			WithHint("delete the stale state file and any legacy project symlinks, then run `lore pull --all`")
 	}
 	// enforce invariants at the trust boundary so invalid state fails here.
 	if issue := validateProjects(st.Projects); issue != nil {
