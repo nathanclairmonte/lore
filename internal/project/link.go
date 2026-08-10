@@ -5,14 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/nathanclairmonte/lore/internal/central"
 	"github.com/nathanclairmonte/lore/internal/config"
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/git"
 	"github.com/nathanclairmonte/lore/internal/link"
-	"github.com/nathanclairmonte/lore/internal/output"
 	"github.com/nathanclairmonte/lore/internal/scan"
 	"github.com/nathanclairmonte/lore/internal/state"
 )
@@ -596,19 +594,17 @@ func pathUnderAnyRoot(dir string, roots []string) bool {
 // "not a repo" into "not ignored", so without a repo there is nothing to
 // ignore and nothing worth warning about.
 func detectUnignored(projectPath string, result *LinkResult) {
-	if _, err := git.RepoToplevel(projectPath); err != nil {
-		return
+	names := make([]string, 0, len(result.Dirs))
+	for _, d := range result.Dirs {
+		if d.Status != LinkStatusRefused {
+			names = append(names, d.Name)
+		}
 	}
+	flagged := unignoredDirs(projectPath, names)
 	for i := range result.Dirs {
-		d := &result.Dirs[i]
-		if d.Status == LinkStatusRefused {
-			continue
+		if flagged[result.Dirs[i].Name] {
+			result.Dirs[i].Unignored = true
 		}
-		ignored, checkErr := git.CheckIgnore(projectPath, d.Name)
-		if checkErr != nil || ignored {
-			continue
-		}
-		d.Unignored = true
 	}
 }
 
@@ -632,36 +628,8 @@ func OfferGitignoreFixes(result *LinkResult) {
 		if !d.Unignored {
 			continue
 		}
-		if applyGitignorePicker(d.Name, result.ProjectPath, repoTop) {
+		if applyGitignorePicker(d.Name, result.ProjectPath, repoTop, true) {
 			d.Unignored = false
 		}
 	}
-}
-
-// applyGitignorePicker offers the slice-4 picker for dirName and applies
-// the chosen entry, returning true only when the dir ends up ignored and
-// verified. Any non-interactive context, a declined picker, a write
-// failure, or a still-not-ignored re-check returns false so the caller
-// leaves an advisory warning. Reuses lore add's gitignore helpers.
-func applyGitignorePicker(dirName, projectPath, repoTop string) bool {
-	target, err := pickGitignoreTarget(dirName)
-	if err != nil {
-		return false
-	}
-	targetPath, err := resolveGitignoreTarget(target, repoTop)
-	if err != nil {
-		return false
-	}
-	pattern := ignorePatternFor(target, dirName, projectPath, repoTop)
-	// link remains on the legacy symlink model until the pull slice replaces it.
-	pattern = strings.TrimSuffix(pattern, "/")
-	if err := git.AppendIgnoreEntry(targetPath, pattern); err != nil {
-		return false
-	}
-	ignored, err := git.CheckIgnore(projectPath, dirName)
-	if err != nil || !ignored {
-		return false
-	}
-	output.Success("added %s to %s", pattern, config.Contract(targetPath))
-	return true
 }

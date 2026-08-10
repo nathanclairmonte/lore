@@ -15,6 +15,7 @@ import (
 	"github.com/nathanclairmonte/lore/internal/detect"
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/git"
+	"github.com/nathanclairmonte/lore/internal/output"
 	"github.com/nathanclairmonte/lore/internal/prompt"
 	"github.com/nathanclairmonte/lore/internal/state"
 )
@@ -453,6 +454,59 @@ func ignorePatternFor(target prompt.GitignoreTarget, name, projectPath, repoTop 
 	default:
 		return name + "/"
 	}
+}
+
+// unignoredDirs reports which of names are not covered by an effective Git
+// ignore rule inside projectPath. Pure detection: it does not prompt or write.
+//
+// A project that isn't a git repo yields nothing: check-ignore folds "not a
+// repo" into "not ignored", so without a repo there is nothing to ignore and
+// nothing worth warning about.
+func unignoredDirs(projectPath string, names []string) map[string]bool {
+	flagged := map[string]bool{}
+	if _, err := git.RepoToplevel(projectPath); err != nil {
+		return flagged
+	}
+	for _, name := range names {
+		ignored, err := git.CheckIgnore(projectPath, name)
+		if err != nil || ignored {
+			continue
+		}
+		flagged[name] = true
+	}
+	return flagged
+}
+
+// applyGitignorePicker offers the interactive picker for dirName and applies
+// the chosen entry, returning true only when the dir ends up ignored and
+// verified. Any non-interactive context, a declined picker, a write failure,
+// or a still-not-ignored re-check returns false so the caller leaves an
+// advisory warning.
+//
+// trimTrailingSlash serves the legacy symlink model, where the managed path is
+// a symlink rather than the real directory ignorePatternFor writes for.
+func applyGitignorePicker(dirName, projectPath, repoTop string, trimTrailingSlash bool) bool {
+	target, err := pickGitignoreTarget(dirName)
+	if err != nil {
+		return false
+	}
+	targetPath, err := resolveGitignoreTarget(target, repoTop)
+	if err != nil {
+		return false
+	}
+	pattern := ignorePatternFor(target, dirName, projectPath, repoTop)
+	if trimTrailingSlash {
+		pattern = strings.TrimSuffix(pattern, "/")
+	}
+	if err := git.AppendIgnoreEntry(targetPath, pattern); err != nil {
+		return false
+	}
+	ignored, err := git.CheckIgnore(projectPath, dirName)
+	if err != nil || !ignored {
+		return false
+	}
+	output.Success("added %s to %s", pattern, config.Contract(targetPath))
+	return true
 }
 
 // renderAddTemplate expands {project} and {dirs} in commit.add_template.
