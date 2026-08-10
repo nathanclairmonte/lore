@@ -23,6 +23,7 @@ func newRootCmd() *cobra.Command {
 		jsonFlag    bool
 		noColorFlag bool
 	)
+	var pushCommand *cobra.Command
 	root := &cobra.Command{
 		Use:   "lore",
 		Short: "Version-controlled per-project agentic AI context",
@@ -43,6 +44,7 @@ func newRootCmd() *cobra.Command {
 				output.SetMode(output.ModeHuman)
 			}
 			output.SetNoColor(noColorFlag)
+			surfacePendingPushFailure(cmd, pushCommand)
 		},
 	}
 	root.PersistentFlags().BoolVar(&jsonFlag, "json", false,
@@ -58,5 +60,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newMvCmd())
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newDiffCmd())
+	pushCommand = newPushCmd()
+	root.AddCommand(pushCommand)
 	return root
 }
