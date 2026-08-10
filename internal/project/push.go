@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/nathanclairmonte/lore/internal/central"
-	"github.com/nathanclairmonte/lore/internal/config"
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/reconcile"
 	"github.com/nathanclairmonte/lore/internal/state"
@@ -62,26 +61,12 @@ func Push(opts PushOptions) (PushResult, error) {
 	if opts.Project != "" && opts.ProjectFromCWD {
 		return PushResult{}, lerr.New(lerr.CodeConflict, "--project and --project-from-cwd cannot be used together")
 	}
-	cfg, _, err := config.Load()
+	ctx, err := openMutationContext()
 	if err != nil {
 		return PushResult{}, err
 	}
-	c, err := openCentral(cfg.CentralRepo)
-	if err != nil {
-		return PushResult{}, err
-	}
-	unlock, err := c.LockMutations()
-	if err != nil {
-		return PushResult{}, err
-	}
-	defer func() { _ = unlock() }()
-	if err := c.RecoverReplacements(); err != nil {
-		return PushResult{}, err
-	}
-	st, _, err := state.Load()
-	if err != nil {
-		return PushResult{}, err
-	}
+	defer ctx.close()
+	cfg, c, st := ctx.config, ctx.central, ctx.state
 	scope := opts.Project
 	cwdCheckout := ""
 	if opts.ProjectFromCWD {
