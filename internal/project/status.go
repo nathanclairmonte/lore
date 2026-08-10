@@ -53,11 +53,6 @@ func Status(projectName string) (StatusResult, error) {
 	if err != nil {
 		return StatusResult{}, err
 	}
-	if projectName != "" {
-		if _, ok := st.ProjectEntryFor(projectName); !ok {
-			return StatusResult{}, lerr.Newf(lerr.CodeNotFound, "project %q is not tracked", projectName)
-		}
-	}
 	cfg, _, err := config.Load()
 	if err != nil {
 		return StatusResult{}, err
@@ -65,6 +60,27 @@ func Status(projectName string) (StatusResult, error) {
 	c, err := openCentral(cfg.CentralRepo)
 	if err != nil {
 		return StatusResult{}, err
+	}
+	return statusFromState(st, c, projectName, "")
+}
+
+func statusFromState(st state.State, c *central.Central, projectName, checkoutPath string) (StatusResult, error) {
+	if projectName != "" {
+		entry, ok := st.ProjectEntryFor(projectName)
+		if !ok {
+			return StatusResult{}, lerr.Newf(lerr.CodeNotFound, "project %q is not tracked", projectName)
+		}
+		if checkoutPath != "" {
+			checkout, ok := st.CheckoutForPath(projectName, checkoutPath)
+			if !ok {
+				return StatusResult{}, lerr.Newf(lerr.CodeNotFound, "checkout %s is not tracked for project %q", checkoutPath, projectName)
+			}
+			// keep scoped inspection from changing the caller's state map.
+			// push still needs every unselected sibling when it saves state.
+			st = st.Clone()
+			entry.Checkouts = []state.CheckoutEntry{checkout}
+			st.Projects[projectName] = entry
+		}
 	}
 	head, err := c.HeadSHA()
 	if err != nil {
