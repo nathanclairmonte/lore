@@ -151,8 +151,7 @@ func PrintAddResult(r AddResult) {
 		Success("Committed to central repo: %q", r.CommitMessage)
 		Success("Recorded sync-base: %s", r.SyncBase)
 		Blank()
-		path := shellQuoteForCD(config.Contract(r.CentralRepo), r.CentralRepo)
-		_, _ = fmt.Fprintf(Out, "Next: cd %s && git push\n", path)
+		printGitPushHint(r.CentralRepo)
 	}
 }
 
