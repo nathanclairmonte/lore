@@ -60,6 +60,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newMvCmd())
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newDiffCmd())
+	root.AddCommand(newPullCmd())
 	pushCommand = newPushCmd()
 	root.AddCommand(pushCommand)
 	return root
