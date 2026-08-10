@@ -34,6 +34,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+	"github.com/nathanclairmonte/lore/internal/config"
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"golang.org/x/term"
 )
@@ -290,4 +291,18 @@ func SetUnicodeForTest(t *testing.T, enabled bool) {
 	prev := unicodeOverride
 	unicodeOverride = &enabled
 	t.Cleanup(func() { unicodeOverride = prev })
+}
+
+// printScannedRoots announces a configured-roots sweep. Only announce a scan
+// when one actually ran: when every project resolved from its recorded path
+// roots is empty, and claiming we swept the roots would be misleading.
+func printScannedRoots(roots []string) {
+	if len(roots) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(Out, "Scanning configured roots for tracked projects...")
+	for _, root := range roots {
+		_, _ = fmt.Fprintf(Out, "  %s\n", config.Contract(root))
+	}
+	Blank()
 }

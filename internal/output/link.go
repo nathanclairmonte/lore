@@ -158,16 +158,7 @@ func PrintLinkAllResult(r LinkAllResult) {
 		return
 	}
 
-	// only announce a scan when one actually ran: when every project
-	// resolved from its recorded path ScannedRoots is empty, and claiming we
-	// swept the roots would be misleading.
-	if len(r.ScannedRoots) > 0 {
-		_, _ = fmt.Fprintln(Out, "Scanning configured roots for tracked projects...")
-		for _, root := range r.ScannedRoots {
-			_, _ = fmt.Fprintf(Out, "  %s\n", config.Contract(root))
-		}
-		Blank()
-	}
+	printScannedRoots(r.ScannedRoots)
 
 	if len(r.Projects) == 0 {
 		Success("No tracked projects in the central repo")
