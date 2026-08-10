@@ -84,3 +84,15 @@ func TestTreesEqualIgnoresNonExecutablePermissionDifferences(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, equal)
 }
+
+func TestTreesEqualIgnoresEmptyDirectories(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	require.NoError(t, os.MkdirAll(filepath.Join(left, "empty", "nested"), 0o755))
+	require.NoError(t, os.Mkdir(right, 0o755))
+
+	equal, err := TreesEqual(left, right)
+	require.NoError(t, err)
+	require.True(t, equal)
+}

@@ -181,10 +181,13 @@ func inspectTree(root string) (map[string]treeEntry, error) {
 		if err != nil || relative == "." {
 			return err
 		}
+		// Git cannot reproduce empty directories, so tree equality ignores
+		// directory entries and compares only reproducible content.
+		if entry.IsDir() {
+			return nil
+		}
 		item := treeEntry{}
 		switch {
-		case entry.IsDir():
-			item.kind = os.ModeDir
 		case entry.Type()&os.ModeSymlink != 0:
 			item.kind = os.ModeSymlink
 			item.linkTarget, err = os.Readlink(path)
