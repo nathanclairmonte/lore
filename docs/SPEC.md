@@ -144,12 +144,9 @@ rm_template      = "chore: remove {project}"
 mv_template      = "refactor: rename {old} to {new}"
 sync_template    = "chore: sync ({projects})"
 
-# Sync behaviour (used by `lore sync`).
-[sync]
-auto_push = false
 ```
 
-Template variables: `{project}`, `{projects}` (comma-separated list), `{old}`, `{new}`, `{date}`, `{hostname}`.
+Template variables: `{project}`, `{projects}` (comma-separated list), `{old}`, `{new}`.
 
 Default style for commit messages: lowercase conventional-commits format.
 
@@ -608,7 +605,7 @@ Diagnose common issues across the entire setup. Categories of checks:
 
 1. **Central repo health** — exists, is a git repo, has remote, working tree state, ahead/behind remote.
 2. **Global gitignore** — all configured `agent_dirs` are ignored.
-3. **Per-project link health** — symlink exists, points correctly, isn't broken, central target exists.
+3. **Per-project copy health:** copy exists, is a real directory, has a reachable sync-base, and has no unresolved divergence.
 4. **Orphan detection** — projects in central with no on-disk checkout for a long time (informational, not an error).
 
 ```
@@ -616,27 +613,36 @@ lore doctor              # diagnose
 lore doctor --fix        # auto-fix safe issues
 ```
 
-`--fix` only auto-fixes unambiguous, reversible issues (recreate a missing symlink to the correct target, append a missing gitignore entry). It does **not** auto-resolve ambiguous cases like "symlink points to wrong target" — those might be intentional.
+`--fix` only auto-fixes unambiguous, reversible issues (re-materialise a missing project copy from central, append a missing gitignore entry). It does **not** auto-resolve divergence.
 
-### `lore sync`
+### `lore push`
 
-Commit any pending changes in the central repo. Designed to be called by hooks but also runnable manually.
+Capture project-copy changes in the central repository. Push copies additions, edits, executable-mode changes, symlink changes, and deletions into central. It then commits the selected paths and advances each pushed checkout's sync-base.
 
 ```
-lore sync                          # interactive, verbose
-lore sync --auto                   # quiet (for hooks), only prints on change or error
-lore sync --project my-app         # scope to one project
-lore sync --project-from-cwd       # scope to whichever project cwd belongs to
-lore sync --push                   # also push (or set sync.auto_push = true in config)
+lore push                          # push all tracked projects
+lore push --auto                   # quiet on a no-op
+lore push --project my-app         # scope to one tracked project
+lore push --project-from-cwd       # scope to the checkout containing cwd
 ```
 
 Behavior:
 
-- If the central repo has no uncommitted changes (in scope), exit silently with code 0 when `--auto` is set; print a "nothing to sync" notice otherwise.
-- Otherwise, stage and commit using `commit.sync_template`. `{projects}` resolves to the comma-separated list of project names that had changes.
-- If `--push` or `sync.auto_push = true`, push afterwards.
-- If the central repo is behind the remote, warn and refuse to push (do not auto-merge or rebase silently).
-- **`--project-from-cwd` is a contract assertion that cwd is inside a tracked project.** If it isn't, error loudly (non-zero exit, stderr) in both `--auto` and interactive modes. Message: *"cwd is not inside a tracked project. Either `lore add` it, or invoke `lore sync` without --project-from-cwd."* This is deliberately not silent in `--auto` mode — the most common cause is that the user ran their harness in a project they forgot to track, and silent failure would let lore-less sessions accumulate unnoticed.
+- Push preflights the complete selection before it mutates central. A dirty central copy, an unhealthy checkout, or a selected checkout that is central-ahead or diverged refuses the complete operation. The error tells the user to run `lore pull` first when reconciliation is required.
+- Project-ahead content is copied as a complete agent-directory tree. This propagates deletions without leaving stale central files.
+- Push always commits with `commit.sync_template`. `{projects}` resolves to the sorted, comma-separated project names that changed. `--no-commit` is not supported because a dirty central working tree cannot be represented by a SHA sync-base.
+- If project and central already match but the base is stale, push safely advances the local sync-base to central `HEAD` without creating a commit.
+- If several checkouts for one project have identical project-ahead content, push captures that content once and advances each matching checkout. If their content differs, push refuses and directs the user to select one with `--project-from-cwd`.
+- `--auto` suppresses only genuine no-op output. Failures remain loud and are recorded at `~/.local/state/lore/last-sync-error.txt`. The next human-mode lore command reports and clears that notice. JSON commands do not consume it. A later successful automatic push clears a stale notice.
+- **`--project-from-cwd` is a contract assertion that cwd is inside a tracked checkout.** If it is not, push exits 3 in both auto and interactive modes.
+
+Lore push never contacts a Git remote. Lore's push and pull verbs reconcile the project copy with central's working tree only. To back up the resulting central commit remotely, use plain Git:
+
+```sh
+cd "$(lore path --repo)" && git push
+```
+
+In JSON mode, push returns `central_repo`, `previous_head`, `commit_sha`, `commit_message`, and `projects`. `previous_head` is the central `HEAD` inspected before push. `commit_sha` and `commit_message` are empty when push creates no commit. Each project contains checkout paths and an outcome of `pushed`, `adopted`, or `unchanged`.
 
 ---
 
@@ -722,7 +728,7 @@ Captured here so they aren't lost. Order is rough priority guidance, not commitm
 
 ### Near-term (v0.2)
 
-- **`lore hooks install`.** v1 expects users to wire up their own harness hooks manually (`lore sync --auto --project-from-cwd` from Claude Code's `SessionEnd` hook, etc.). A `lore hooks` command would automate that for common harnesses via a provider interface (`Name`, `Detect`, `InstallHook`, `UninstallHook`, `Status`) — Claude Code first, then Cursor / Aider / Goose as they grow first-class lifecycle hooks. Must defensively merge into existing user hook config, never clobber. Failed hooks should write to `~/.local/state/lore/last-sync-error.txt` and the next interactive `lore` invocation surfaces it as a banner.
+- **`lore hooks install`.** v1 expects users to wire up their own harness hooks manually (`lore push --auto --project-from-cwd` from Claude Code's `SessionEnd` hook, etc.). A `lore hooks` command would automate that for common harnesses via a provider interface (`Name`, `Detect`, `InstallHook`, `UninstallHook`, `Status`), with Claude Code first, then Cursor, Aider, and Goose as they grow first-class lifecycle hooks. It must defensively merge into existing user hook config and never clobber it. Failed hooks should write to `~/.local/state/lore/last-sync-error.txt`, and the next interactive `lore` invocation should surface it as a banner.
 - **Better interactive `lore doctor --fix` flow** with per-issue confirmation.
 - **Bash/zsh/fish completions** via `lore completion <shell>`.
 
@@ -767,7 +773,7 @@ The originally-deferred open questions have all been resolved as part of the des
 3. **~~Nested `.git` inside an agent directory~~** — `lore add` refuses with clear recovery instructions.
 4. **~~Agent dir is itself a symlink at onboarding time~~** — `lore add` refuses; user replaces with a real directory before retrying.
 5. **~~Multiple agent dirs per project~~** — supported as a first-class concept. See [Project definition](CONTEXT.md) and the `lore add` agent-dir detection step. Project identity is `(name, set-of-agent-dirs)`; commands operate on the whole project by default and accept `--dir` to scope.
-6. **~~`lore sync --project-from-cwd` when cwd isn't inside any tracked project~~** — error loudly (non-zero exit, stderr) in both `--auto` and interactive modes. See `lore sync` behavior.
+6. **~~`lore push --project-from-cwd` when cwd isn't inside any tracked project~~**: error loudly (non-zero exit, stderr) in both `--auto` and interactive modes. See `lore push` behavior.
 
 ### Still open
 
