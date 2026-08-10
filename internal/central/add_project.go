@@ -134,7 +134,10 @@ func (c *Central) Commit(message string) error {
 // git records the delete-at-old and add-at-new sides of the rename. Uses the
 // real git identity per ADR 0003, same as Commit.
 func (c *Central) CommitPaths(message string, paths ...string) error {
-	args := append([]string{"commit", "-m", message, "--"}, paths...)
+	// commit refreshes the index before writing the tree. force mode checks
+	// here as well as during staging so core.fileMode=false cannot discard an
+	// executable-only replacement before the commit is created.
+	args := append([]string{"-c", "core.fileMode=true", "commit", "-m", message, "--"}, paths...)
 	_, err := git.Run(c.Path, args...)
 	return err
 }
