@@ -174,7 +174,7 @@ path = "/home/nathan/worktrees/my-nextjs-app-feature"
 sync_base = "89abcdef0123456789abcdef0123456789abcdef"
 ```
 
-Schema v3 replaces the existing v2 layout. Version 2 already stored each project's agent-directory set, so the copy-model state could not safely reuse that version number. Lore rejects older schemas. It does not migrate them in place. `lore pull --all` owns legacy symlink migration and state recovery.
+Schema v3 replaces the existing v2 layout. Version 2 already stored each project's agent-directory set, so the copy-model state could not safely reuse that version number. Lore rejects older schemas and does not migrate them. To start fresh, delete the incompatible state file and any legacy project symlinks, then run `lore pull --all` to rebuild current state from central and the configured project roots.
 
 ---
 
@@ -614,6 +614,31 @@ lore doctor --fix        # auto-fix safe issues
 ```
 
 `--fix` only auto-fixes unambiguous, reversible issues (re-materialise a missing project copy from central, append a missing gitignore entry). It does **not** auto-resolve divergence.
+
+### `lore pull`
+
+Receive committed central content into project copies. Pull does not read from or contact a Git remote.
+
+```
+lore pull                         # pull the tracked checkout containing cwd
+lore pull my-app                  # pull every recorded checkout for one project
+lore pull my-app --path <path>    # pull or adopt one exact checkout
+lore pull --all                   # use recorded paths, then scan projects_roots
+```
+
+Behavior in the non-merge implementation:
+
+- A missing project copy is materialised from committed central `HEAD`.
+- A central-ahead checkout receives the complete changed agent-directory trees. Deletions, executable modes, and nested symlinks are preserved.
+- A byte-identical checkout with missing state or an unreachable sync-base is adopted at central `HEAD`.
+- A project-ahead checkout is left unchanged and remains ready to push.
+- Divergence and a differing copy without a usable sync-base are refused. Three-way merge and explicit direction selection are added by the next implementation slice.
+- A named pull preflights every recorded checkout before mutation. `--all` handles each checkout atomically, continues after a failure, reports every result, and returns the most severe failure code.
+- `--all` uses every valid recorded checkout. If none is valid, it scans configured roots. One match is adopted. Several matches remain ambiguous and require explicit `--path` commands.
+- Pull refuses dirty central content. Committed `HEAD` remains the authority.
+- Pull silently accepts any effective Git ignore rule. An interactive single pull offers the existing repository, global, and `.git/info/exclude` picker when needed. `--all` and JSON never prompt. They report unignored copies instead.
+
+In JSON mode, pull returns `central_repo`, `central_head`, `scanned_roots`, and `projects`. Each project includes its status, ambiguous matches, checkout results, and error text. Each checkout includes its path, status, sync-base, and per-directory results. Per-directory results include the path, outcome, and `unignored` warning flag. Arrays are always present.
 
 ### `lore push`
 
