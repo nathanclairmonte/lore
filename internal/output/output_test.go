@@ -173,6 +173,45 @@ func sampleMultiAddResult() AddResult {
 	}
 }
 
+func samplePushResult() PushResult {
+	return PushResult{
+		CentralRepo:   "/home/u/agent-context",
+		PreviousHead:  "0123456789abcdef0123456789abcdef01234567",
+		CommitSHA:     "89abcdef0123456789abcdef0123456789abcdef",
+		CommitMessage: "chore: sync (my-app)",
+		Projects: []PushProjectResult{{
+			Name: "my-app",
+			Checkouts: []PushCheckoutResult{{
+				Path: "/home/u/code/my-app", Status: "pushed",
+			}},
+		}},
+	}
+}
+
+func TestGolden_PrintPush_Human(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	PrintPush(samplePushResult(), false)
+	assertGolden(t, "push_human", out.String())
+}
+
+func TestGolden_PrintPush_JSON(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintPush(samplePushResult(), false)
+	assertGolden(t, "push_json", out.String())
+}
+
+func TestPrintPushReportsAdoptedCheckout(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	PrintPush(PushResult{Projects: []PushProjectResult{{
+		Name: "my-app",
+		Checkouts: []PushCheckoutResult{{
+			Path: "/home/u/code/my-app", Status: PushAdopted,
+		}},
+	}}}, true)
+	require.Equal(t, "[ok] Advanced sync-base for 1 checkout(s)\n", out.String())
+}
+
 // samplePartialAddResult covers the slice-5 partial-failure case: one
 // dir landed, one was refused for safety. golden locks the layout: the
 // added block renders normally, the skipped block follows with a "warn"
