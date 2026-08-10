@@ -585,36 +585,6 @@ func pathUnderAnyRoot(dir string, roots []string) bool {
 	return false
 }
 
-// longestRecordedAncestor returns the tracked project whose recorded path
-// is dir itself or the nearest ancestor of dir. Longest match wins so a
-// project nested inside another resolves to the inner one.
-func longestRecordedAncestor(st *state.State, dir string) (name, path string) {
-	for n, entry := range st.Projects {
-		for _, checkout := range entry.Checkouts {
-			if !isSelfOrAncestor(checkout.Path, dir) {
-				continue
-			}
-			if len(checkout.Path) > len(path) {
-				name, path = n, checkout.Path
-			}
-		}
-	}
-	return name, path
-}
-
-// isSelfOrAncestor reports whether descendant is ancestor itself or lives
-// underneath it, using a cleaned relative path so ".." escapes don't count.
-func isSelfOrAncestor(ancestor, descendant string) bool {
-	rel, err := filepath.Rel(ancestor, descendant)
-	if err != nil {
-		return false
-	}
-	if rel == "." {
-		return true
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
 // detectUnignored re-runs git check-ignore on each correctly-linked dir and
 // flags Unignored on any that come up un-ignored (common after a clone that
 // recorded the original choice in .git/info/exclude, which clones don't
