@@ -238,6 +238,12 @@ func Blank() {
 	_, _ = fmt.Fprintln(Out)
 }
 
+// PrintDeferredFailure writes a deferred background failure to stderr.
+func PrintDeferredFailure(data []byte) error {
+	_, err := fmt.Fprintf(Err, "Previous automatic push failed:\n%s", data)
+	return err
+}
+
 // PrintError renders a lore error to Err with its hint, if any.
 // Suppressed in JSON mode: the JSON envelope is the only thing the
 // caller should be parsing on a failure (slice 21 polishes the failure

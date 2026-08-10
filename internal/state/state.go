@@ -17,6 +17,7 @@ import (
 const CurrentSchemaVersion = 3
 
 const stateFileRelPath = "lore/state.toml"
+const syncErrorFileName = "last-sync-error.txt"
 
 // CheckoutEntry records one project copy on this machine.
 type CheckoutEntry struct {
@@ -63,6 +64,15 @@ func Path() (string, error) {
 		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot determine home directory")
 	}
 	return filepath.Join(home, ".local", "state", stateFileRelPath), nil
+}
+
+// SyncErrorPath returns the deferred automatic-sync error record path.
+func SyncErrorPath() (string, error) {
+	path, err := Path()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), syncErrorFileName), nil
 }
 
 // Defaults returns an empty State at the current schema version.
