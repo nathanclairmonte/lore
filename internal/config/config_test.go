@@ -46,7 +46,6 @@ func TestDefaultsExpandsPaths(t *testing.T) {
 	}
 	require.Equal(t, []string{".agents", ".claude", ".codex", ".cursor"}, cfg.AgentDirs)
 	require.True(t, cfg.Commit.Auto)
-	require.False(t, cfg.Sync.AutoPush)
 }
 
 func TestWriteDefaultsWritesCommentedTemplate(t *testing.T) {

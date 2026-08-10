@@ -55,8 +55,6 @@ add_template     = "feat: add {project}"
 rm_template      = "chore: remove {project}"
 mv_template      = "refactor: rename {old} to {new}"
 sync_template    = "chore: sync ({projects})"
-[sync]
-auto_push = false
 EOF
 lore-dev init
 ```
