@@ -156,7 +156,7 @@ func TestLoreStatusJSONEmitsResultBeforeUnhealthyExit(t *testing.T) {
 			} `json:"checkouts"`
 		} `json:"projects"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(buffer.String()), &envelope))
+	require.NoError(t, json.Unmarshal(buffer.Bytes(), &envelope))
 	require.Equal(t, "diverged", envelope.Projects[0].Checkouts[0].State)
 	require.Empty(t, envelope.Projects[0].Checkouts[0].Issues)
 	require.Equal(t, "conflict-markers", envelope.Projects[0].Checkouts[0].Dirs[0].Issues[0].Kind)
