@@ -9,42 +9,187 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 )
 
+// TreeReplacement names one central-to-project tree publication.
+type TreeReplacement struct {
+	Source      string
+	Destination string
+}
+
+// ReplaceTrees atomically publishes a set of replacement trees.
+func ReplaceTrees(replacements []TreeReplacement) (err error) {
+	if len(replacements) == 0 {
+		return nil
+	}
+
+	ordered := append([]TreeReplacement(nil), replacements...)
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].Destination < ordered[j].Destination
+	})
+
+	type stagedTree struct {
+		replacement TreeReplacement
+		staged      string
+		backup      string
+		published   bool
+	}
+	staged := make([]stagedTree, 0, len(ordered))
+	finished := false
+	defer func() {
+		if finished {
+			return
+		}
+		var rollbackErrors []error
+		for i := len(staged) - 1; i >= 0; i-- {
+			item := staged[i]
+			if item.published {
+				if removeErr := os.RemoveAll(item.replacement.Destination); removeErr != nil {
+					rollbackErrors = append(rollbackErrors,
+						fmt.Errorf("cannot remove %s: %w", item.replacement.Destination, removeErr))
+				}
+			}
+			if item.backup != "" {
+				if restoreErr := os.Rename(item.backup, item.replacement.Destination); restoreErr != nil {
+					rollbackErrors = append(rollbackErrors,
+						fmt.Errorf("cannot restore %s from %s: %w",
+							item.replacement.Destination, item.backup, restoreErr))
+				}
+			}
+			_ = os.RemoveAll(item.staged)
+		}
+		// a stranded backup is the user's only copy of the original tree, so
+		// naming it in the error is the only pointer they get to their content.
+		if rollbackErr := errors.Join(rollbackErrors...); rollbackErr != nil {
+			err = lerr.Wrap(lerr.CodeInconsistency, err,
+				fmt.Sprintf("project copy replacement failed and rollback also failed: %v", rollbackErr))
+		}
+	}()
+
+	for i, replacement := range ordered {
+		// sorting by destination puts any duplicate next to its twin.
+		if i > 0 && replacement.Destination == ordered[i-1].Destination {
+			return lerr.Newf(lerr.CodeInconsistency,
+				"duplicate tree replacement destination %s", replacement.Destination)
+		}
+		stagePath, err := stageTree(replacement.Source, filepath.Dir(replacement.Destination))
+		if err != nil {
+			return err
+		}
+		staged = append(staged, stagedTree{replacement: replacement, staged: stagePath})
+	}
+
+	for i := range staged {
+		item := &staged[i]
+		info, err := os.Lstat(item.replacement.Destination)
+		switch {
+		case err == nil:
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return lerr.Newf(lerr.CodeRefusedSafety,
+					"project copy %s is not a real directory", item.replacement.Destination)
+			}
+			backupPath, backupErr := unusedSiblingPath(filepath.Dir(item.replacement.Destination), ".lore-backup-")
+			if backupErr != nil {
+				return backupErr
+			}
+			if err := os.Rename(item.replacement.Destination, backupPath); err != nil {
+				return lerr.Wrap(lerr.CodeGenericError, err,
+					fmt.Sprintf("cannot stage existing project copy %s", item.replacement.Destination))
+			}
+			item.backup = backupPath
+		case errors.Is(err, os.ErrNotExist):
+			// a missing destination is the normal materialisation path.
+		default:
+			return lerr.Wrap(lerr.CodeGenericError, err,
+				fmt.Sprintf("cannot inspect %s", item.replacement.Destination))
+		}
+		if err := os.Rename(item.staged, item.replacement.Destination); err != nil {
+			return lerr.Wrap(lerr.CodeGenericError, err,
+				fmt.Sprintf("cannot publish project copy %s", item.replacement.Destination))
+		}
+		item.published = true
+	}
+
+	// publication is now committed. Backup cleanup failures must not roll
+	// back a complete checkout to a mixture of old and new trees.
+	finished = true
+	// one undeletable backup must not strand the rest, so every backup is
+	// attempted before the failures are reported together.
+	var cleanupErrors []error
+	for _, item := range staged {
+		if item.backup != "" {
+			if cleanupErr := os.RemoveAll(item.backup); cleanupErr != nil {
+				cleanupErrors = append(cleanupErrors, cleanupErr)
+			}
+		}
+	}
+	if cleanupErr := errors.Join(cleanupErrors...); cleanupErr != nil {
+		return lerr.Wrap(lerr.CodeInconsistency, cleanupErr,
+			"project copy updated but backup cleanup failed")
+	}
+	return nil
+}
+
+func unusedSiblingPath(parent, prefix string) (string, error) {
+	path, err := os.MkdirTemp(parent, prefix)
+	if err != nil {
+		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot reserve project-copy staging path")
+	}
+	if err := os.Remove(path); err != nil {
+		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot prepare project-copy staging path")
+	}
+	return path, nil
+}
+
 // CopyTree copies source to a new destination and publishes it atomically.
 func CopyTree(source, destination string) error {
-	info, err := os.Lstat(source)
-	if err != nil {
-		return lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot inspect %s", source))
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return lerr.Newf(lerr.CodeRefusedSafety,
-			"agent directory %s must be a real directory", source)
-	}
 	if _, err := os.Lstat(destination); err == nil {
 		return lerr.Newf(lerr.CodeConflict, "%s already exists", destination)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot inspect %s", destination))
 	}
-
-	parent := filepath.Dir(destination)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot create %s", parent))
-	}
-	temporary, err := os.MkdirTemp(parent, ".lore-copy-*")
+	staged, err := stageTree(source, filepath.Dir(destination))
 	if err != nil {
-		return lerr.Wrap(lerr.CodeGenericError, err, "cannot create temporary copy directory")
+		return err
 	}
-	published := false
+	if err := os.Rename(staged, destination); err != nil {
+		_ = os.RemoveAll(staged)
+		return lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot publish %s", destination))
+	}
+	return nil
+}
+
+// stageTree copies source into a fresh directory beside the eventual
+// destination and returns that path. Staging as a sibling keeps publication a
+// same-filesystem rename, so the caller owns the staged tree and must either
+// rename it into place or remove it.
+func stageTree(source, parent string) (string, error) {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return "", lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot inspect %s", source))
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", lerr.Newf(lerr.CodeRefusedSafety,
+			"agent directory %s must be a real directory", source)
+	}
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot create %s", parent))
+	}
+	temporary, err := os.MkdirTemp(parent, ".lore-stage-*")
+	if err != nil {
+		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot create temporary copy directory")
+	}
+	complete := false
 	defer func() {
-		if !published {
+		if !complete {
 			_ = os.RemoveAll(temporary)
 		}
 	}()
 	if err := os.Chmod(temporary, 0o755); err != nil {
-		return lerr.Wrap(lerr.CodeGenericError, err, "cannot set temporary copy permissions")
+		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot set temporary copy permissions")
 	}
 
 	err = filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -85,15 +230,12 @@ func CopyTree(source, destination string) error {
 	})
 	if err != nil {
 		if lerr.CodeOf(err) != lerr.CodeGenericError {
-			return err
+			return "", err
 		}
-		return lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot copy %s", source))
+		return "", lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot copy %s", source))
 	}
-	if err := os.Rename(temporary, destination); err != nil {
-		return lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot publish %s", destination))
-	}
-	published = true
-	return nil
+	complete = true
+	return temporary, nil
 }
 
 func copyRegularFile(source, destination string, executable bool) error {
