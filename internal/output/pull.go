@@ -3,6 +3,7 @@ package output
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 
 	"github.com/nathanclairmonte/lore/internal/config"
 )
@@ -19,6 +20,16 @@ const (
 	PullDirUnchanged PullDirStatus = "unchanged"
 	// PullDirProjectAhead means the directory holds changes central lacks.
 	PullDirProjectAhead PullDirStatus = "project-ahead"
+	// PullDirMerged means text differences merged without conflicts.
+	PullDirMerged PullDirStatus = "merged"
+	// PullDirConflicted means text conflict markers were written.
+	PullDirConflicted PullDirStatus = "conflicted"
+	// PullDirKeepBoth means a binary or non-text sibling was written.
+	PullDirKeepBoth PullDirStatus = "keep-both"
+	// PullDirCentralForced means explicit central selection replaced the directory.
+	PullDirCentralForced PullDirStatus = "central-forced"
+	// PullDirProjectForced means explicit project selection retained the directory.
+	PullDirProjectForced PullDirStatus = "project-forced"
 )
 
 // PullCheckoutStatus mirrors project.PullCheckoutStatus. Values are identical
@@ -40,6 +51,14 @@ const (
 	PullCheckoutRefused PullCheckoutStatus = "refused"
 	// PullCheckoutFailed means the checkout was attempted and errored.
 	PullCheckoutFailed PullCheckoutStatus = "failed"
+	// PullCheckoutMerged means every divergence merged cleanly.
+	PullCheckoutMerged PullCheckoutStatus = "merged"
+	// PullCheckoutConflicted means unresolved artifacts were published.
+	PullCheckoutConflicted PullCheckoutStatus = "conflicted"
+	// PullCheckoutCentralForced means central was explicitly selected.
+	PullCheckoutCentralForced PullCheckoutStatus = "central-forced"
+	// PullCheckoutProjectForced means project was explicitly selected.
+	PullCheckoutProjectForced PullCheckoutStatus = "project-forced"
 )
 
 // PullProjectStatus mirrors project.PullProjectStatus.
@@ -58,14 +77,24 @@ const (
 	PullProjectRefused PullProjectStatus = "refused"
 	// PullProjectFailed means the project was attempted and errored.
 	PullProjectFailed PullProjectStatus = "failed"
+	// PullProjectConflicted means at least one checkout needs resolution.
+	PullProjectConflicted PullProjectStatus = "conflicted"
 )
+
+// PullConflictResult is one public unresolved merge artifact.
+type PullConflictResult struct {
+	Path        string `json:"path"`
+	Kind        string `json:"kind"`
+	SiblingPath string `json:"sibling_path"`
+}
 
 // PullDirResult is one public agent-directory outcome.
 type PullDirResult struct {
-	Name      string        `json:"name"`
-	Path      string        `json:"path"`
-	Status    PullDirStatus `json:"status"`
-	Unignored bool          `json:"unignored"`
+	Name      string               `json:"name"`
+	Path      string               `json:"path"`
+	Status    PullDirStatus        `json:"status"`
+	Unignored bool                 `json:"unignored"`
+	Conflicts []PullConflictResult `json:"conflicts"`
 }
 
 // PullCheckoutResult is one public checkout outcome.
@@ -134,11 +163,36 @@ func PrintPull(result PullResult) {
 				Hint("run `lore push --project-from-cwd` from that checkout to capture its changes")
 			case PullCheckoutUnchanged:
 				Success("Already up to date: %s", config.Contract(checkout.Path))
+			case PullCheckoutMerged:
+				_, _ = fmt.Fprintf(Out, "%s Merged %s  %s\n", pathStyle.Render(g.arrowLeft), project.Name, config.Contract(checkout.Path))
+				Hint("run `lore push --project-from-cwd` from that checkout to capture the merge")
+			case PullCheckoutConflicted:
+				Warn("Pulled %s with unresolved conflicts: %s", project.Name, config.Contract(checkout.Path))
+				printPullConflicts(checkout)
+				Hint("resolve the files above, then run `lore push --project-from-cwd` from that checkout")
+			case PullCheckoutCentralForced:
+				Warn("Selected central content for %s: %s", project.Name, config.Contract(checkout.Path))
+			case PullCheckoutProjectForced:
+				Warn("Kept project content for %s: %s", project.Name, config.Contract(checkout.Path))
+				Hint("run `lore push --project-from-cwd` from that checkout to capture its content")
 			case PullCheckoutRefused, PullCheckoutFailed:
 				Warn("Could not pull %s: %s", config.Contract(checkout.Path), checkout.Error)
 			default:
 				Warn("Could not render pull result for %s: unknown status %q", config.Contract(checkout.Path), checkout.Status)
 			}
+		}
+	}
+}
+
+func printPullConflicts(checkout PullCheckoutResult) {
+	for _, dir := range checkout.Dirs {
+		for _, conflict := range dir.Conflicts {
+			path := filepath.Join(dir.Name, conflict.Path)
+			if conflict.Kind == "keep-both" {
+				Warn("binary conflict: %s and %s", path, filepath.Join(dir.Name, conflict.SiblingPath))
+				continue
+			}
+			Warn("text conflict: %s contains conflict markers", path)
 		}
 	}
 }

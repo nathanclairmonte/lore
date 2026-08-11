@@ -224,7 +224,7 @@ func samplePullResult() PullResult {
 				SyncBase: "89abcdef0123456789abcdef0123456789abcdef", Error: "",
 				Dirs: []PullDirResult{{
 					Name: ".claude", Path: "/home/u/code/my-app/.claude",
-					Status: "updated", Unignored: false,
+					Status: "updated", Unignored: false, Conflicts: []PullConflictResult{},
 				}},
 			}},
 		}},
