@@ -624,21 +624,30 @@ lore pull                         # pull the tracked checkout containing cwd
 lore pull my-app                  # pull every recorded checkout for one project
 lore pull my-app --path <path>    # pull or adopt one exact checkout
 lore pull --all                   # use recorded paths, then scan projects_roots
+lore pull my-app --central        # choose central for every difference
+lore pull my-app --project        # keep project content for every difference
 ```
 
-Behavior in the non-merge implementation:
+Behavior:
 
 - A missing project copy is materialised from committed central `HEAD`.
 - A central-ahead checkout receives the complete changed agent-directory trees. Deletions, executable modes, and nested symlinks are preserved.
 - A byte-identical checkout with missing state or an unreachable sync-base is adopted at central `HEAD`.
 - A project-ahead checkout is left unchanged and remains ready to push.
-- Divergence and a differing copy without a usable sync-base are refused. Three-way merge and explicit direction selection are added by the next implementation slice.
+- Diverged regular text files use a genuine three-way merge against the recorded base. Non-overlapping edits merge automatically.
+- An overlapping text conflict is written with `project` and `central` conflict markers. Pull advances the sync-base to central `HEAD`, exits 7, and directs the user to resolve the file and push. Advancing the base makes the resolved content project-ahead and preserves the normal push workflow.
+- A regular file is mergeable text only when every present project, central, and base value is valid UTF-8 and contains no NUL byte.
+- Binary files and same-type non-text objects keep the project value at its original path. The central value is written to a `.sync-conflict` sibling. Pull refuses before mutation if that sibling already exists. Status treats the sibling as unresolved, and push refuses until the user removes it.
+- Modify/delete conflicts and incompatible type conflicts are refused before mutation because keep-both cannot represent both values faithfully.
+- `--central` replaces every differing directory with committed central content. `--project` keeps project content and advances the base so the next push can capture it. The flags are mutually exclusive and cannot be combined with `--all`.
+- A differing copy without a usable sync-base requires `--central` or `--project`. Equal copies still re-adopt silently.
 - A named pull preflights every recorded checkout before mutation. `--all` handles each checkout atomically, continues after a failure, reports every result, and returns the most severe failure code.
 - `--all` uses every valid recorded checkout. If none is valid, it scans configured roots. One match is adopted. Several matches remain ambiguous and require explicit `--path` commands.
 - Pull refuses dirty central content. Committed `HEAD` remains the authority.
 - Pull silently accepts any effective Git ignore rule. An interactive single pull offers the existing repository, global, and `.git/info/exclude` picker when needed. `--all` and JSON never prompt. They report unignored copies instead.
+- Project publication uses a durable transaction record. An incomplete publication rolls back. A fully published transaction retains the new trees and records its intended sync-base before the next status, diff, push, or pull classification. Unrecorded staging or backup artifacts are never deleted automatically.
 
-In JSON mode, pull returns `central_repo`, `central_head`, `scanned_roots`, and `projects`. Each project includes its status, ambiguous matches, checkout results, and error text. Each checkout includes its path, status, sync-base, and per-directory results. Per-directory results include the path, outcome, and `unignored` warning flag. Arrays are always present.
+In JSON mode, pull returns `central_repo`, `central_head`, `scanned_roots`, and `projects`. Each project includes its status, ambiguous matches, checkout results, and error text. Each checkout includes its path, status, sync-base, and per-directory results. Per-directory results include the path, outcome, `unignored` warning flag, and a non-null `conflicts` array. Each conflict records its relative path, kind, and optional sibling path. Arrays are always present.
 
 ### `lore push`
 
