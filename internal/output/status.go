@@ -41,6 +41,7 @@ const (
 	SyncIssueCopyInvalid       SyncIssueKind = "copy-invalid"
 	SyncIssueUnsupportedObject SyncIssueKind = "unsupported-object"
 	SyncIssueConflictMarkers   SyncIssueKind = "conflict-markers"
+	SyncIssueConflictSibling   SyncIssueKind = "conflict-sibling"
 	SyncIssueCentralDirty      SyncIssueKind = "central-dirty"
 	SyncIssueBaseUnreachable   SyncIssueKind = "base-unreachable"
 	SyncIssueCentralMissing    SyncIssueKind = "central-missing"

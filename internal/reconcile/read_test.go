@@ -96,6 +96,29 @@ func TestInspectTreeIgnoresMarkerBytesInBinaryFile(t *testing.T) {
 	require.Empty(t, issues)
 }
 
+func TestInspectTreeDoesNotFlagConflictSuffixWithoutMergeContext(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "asset.bin.sync-conflict"), []byte{0, 2}, 0o644))
+
+	_, issues, err := InspectTree(root)
+	require.NoError(t, err)
+	require.Empty(t, issues)
+}
+
+func TestClassifyFlagsKeepBothConflictSibling(t *testing.T) {
+	central := Entry{Kind: KindFile, Data: []byte{0, 2}}
+	project := Snapshot{
+		"asset.bin":               {Kind: KindFile, Data: []byte{0, 1}},
+		"asset.bin.sync-conflict": central,
+	}
+
+	result := Classify(project, Snapshot{"asset.bin": central}, Snapshot{"asset.bin": central}, nil)
+	require.Equal(t, []Issue{{
+		Kind: IssueConflictSibling, Path: "asset.bin.sync-conflict",
+		Message: "path is an unresolved keep-both conflict sibling",
+	}}, result.Issues)
+}
+
 func TestInspectTreeReportsUnreadablePathAndContinues(t *testing.T) {
 	root := t.TempDir()
 	unreadable := filepath.Join(root, "unreadable")

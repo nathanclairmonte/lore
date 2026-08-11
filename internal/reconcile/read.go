@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"unicode/utf8"
 
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
@@ -38,6 +39,7 @@ const (
 	IssueCopyInvalid       IssueKind = "copy-invalid"
 	IssueUnsupportedObject IssueKind = "unsupported-object"
 	IssueConflictMarkers   IssueKind = "conflict-markers"
+	IssueConflictSibling   IssueKind = "conflict-sibling"
 	IssueCentralDirty      IssueKind = "central-dirty"
 	IssueBaseUnreachable   IssueKind = "base-unreachable"
 	IssueCentralMissing    IssueKind = "central-missing"
@@ -168,6 +170,7 @@ func issuePath(root, path string) string {
 // flagged with IssueUnsupportedObject are excluded from the file records
 // because Git cannot reproduce them on either side.
 func Classify(project, central, base Snapshot, issues []Issue) Result {
+	issues = append(append([]Issue(nil), issues...), conflictSiblingIssues(project, central, base)...)
 	unsupported := map[string]struct{}{}
 	for _, issue := range issues {
 		if issue.Kind == IssueUnsupportedObject {
@@ -282,7 +285,7 @@ func entryPointer(entry Entry, ok bool) *Entry {
 }
 
 func hasConflictMarkers(data []byte) bool {
-	if bytes.Contains(data, []byte{0}) || !utf8.Valid(data) {
+	if !isTextData(data) {
 		return false
 	}
 	markers := [3][]byte{[]byte("<<<<<<<"), []byte("======="), []byte(">>>>>>>")}
@@ -300,6 +303,32 @@ func hasConflictMarkers(data []byte) bool {
 		}
 		remaining = rest
 	}
+}
+
+func isTextData(data []byte) bool {
+	return !bytes.Contains(data, []byte{0}) && utf8.Valid(data)
+}
+
+func conflictSiblingIssues(project, central, base Snapshot) []Issue {
+	issues := []Issue{}
+	for siblingPath, sibling := range project {
+		if !strings.HasSuffix(siblingPath, ConflictSiblingSuffix) {
+			continue
+		}
+		path := strings.TrimSuffix(siblingPath, ConflictSiblingSuffix)
+		original, originalExists := project[path]
+		if !originalExists || entriesEqual(original, true, sibling, true) {
+			continue
+		}
+		centralEntry, centralExists := central[path]
+		baseEntry, baseExists := base[path]
+		matchesCentral := entriesEqual(sibling, true, centralEntry, centralExists)
+		matchesBase := entriesEqual(sibling, true, baseEntry, baseExists)
+		if matchesCentral || matchesBase {
+			issues = append(issues, Issue{Kind: IssueConflictSibling, Path: siblingPath, Message: "path is an unresolved keep-both conflict sibling"})
+		}
+	}
+	return issues
 }
 
 // SortIssues orders issues by path then kind so output stays stable.
