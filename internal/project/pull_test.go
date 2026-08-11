@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPullKeepsPublishedCopyWhenStateSaveFailsAndRetryAdopts(t *testing.T) {
+func TestPullRetryAdoptsPublishedCopyWhenStateSaveFails(t *testing.T) {
 	centralPath, projectRoot := addSandbox(t)
 	_, err := Add(AddOptions{ProjectPath: projectRoot})
 	require.NoError(t, err)
@@ -52,7 +52,7 @@ func TestPullKeepsPublishedCopyWhenStateSaveFailsAndRetryAdopts(t *testing.T) {
 	savePullState = originalSave
 	retry, err := Pull(PullOptions{Name: "my-app"})
 	require.NoError(t, err)
-	require.Equal(t, PullCheckoutAdopted, retry.Projects[0].Checkouts[0].Status)
+	require.Equal(t, PullCheckoutUnchanged, retry.Projects[0].Checkouts[0].Status)
 	afterRetry, _, err := state.Load()
 	require.NoError(t, err)
 	entry, ok = afterRetry.ProjectEntryFor("my-app")
