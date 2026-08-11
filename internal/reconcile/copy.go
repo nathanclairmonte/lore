@@ -10,138 +10,20 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
+)
+
+const (
+	StagePathPrefix  = ".lore-stage-"
+	BackupPathPrefix = ".lore-backup-"
 )
 
 // TreeReplacement names one central-to-project tree publication.
 type TreeReplacement struct {
 	Source      string
 	Destination string
-}
-
-// ReplaceTrees atomically publishes a set of replacement trees.
-func ReplaceTrees(replacements []TreeReplacement) (err error) {
-	if len(replacements) == 0 {
-		return nil
-	}
-
-	ordered := append([]TreeReplacement(nil), replacements...)
-	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].Destination < ordered[j].Destination
-	})
-
-	type stagedTree struct {
-		replacement TreeReplacement
-		staged      string
-		backup      string
-		published   bool
-	}
-	staged := make([]stagedTree, 0, len(ordered))
-	finished := false
-	defer func() {
-		if finished {
-			return
-		}
-		var rollbackErrors []error
-		for i := len(staged) - 1; i >= 0; i-- {
-			item := staged[i]
-			if item.published {
-				if removeErr := os.RemoveAll(item.replacement.Destination); removeErr != nil {
-					rollbackErrors = append(rollbackErrors,
-						fmt.Errorf("cannot remove %s: %w", item.replacement.Destination, removeErr))
-				}
-			}
-			if item.backup != "" {
-				if restoreErr := os.Rename(item.backup, item.replacement.Destination); restoreErr != nil {
-					rollbackErrors = append(rollbackErrors,
-						fmt.Errorf("cannot restore %s from %s: %w",
-							item.replacement.Destination, item.backup, restoreErr))
-				}
-			}
-			_ = os.RemoveAll(item.staged)
-		}
-		// a stranded backup is the user's only copy of the original tree, so
-		// naming it in the error is the only pointer they get to their content.
-		if rollbackErr := errors.Join(rollbackErrors...); rollbackErr != nil {
-			err = lerr.Wrap(lerr.CodeInconsistency, err,
-				fmt.Sprintf("project copy replacement failed and rollback also failed: %v", rollbackErr))
-		}
-	}()
-
-	for i, replacement := range ordered {
-		// sorting by destination puts any duplicate next to its twin.
-		if i > 0 && replacement.Destination == ordered[i-1].Destination {
-			return lerr.Newf(lerr.CodeInconsistency,
-				"duplicate tree replacement destination %s", replacement.Destination)
-		}
-		stagePath, err := stageTree(replacement.Source, filepath.Dir(replacement.Destination))
-		if err != nil {
-			return err
-		}
-		staged = append(staged, stagedTree{replacement: replacement, staged: stagePath})
-	}
-
-	for i := range staged {
-		item := &staged[i]
-		info, err := os.Lstat(item.replacement.Destination)
-		switch {
-		case err == nil:
-			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-				return lerr.Newf(lerr.CodeRefusedSafety,
-					"project copy %s is not a real directory", item.replacement.Destination)
-			}
-			backupPath, backupErr := unusedSiblingPath(filepath.Dir(item.replacement.Destination), ".lore-backup-")
-			if backupErr != nil {
-				return backupErr
-			}
-			if err := os.Rename(item.replacement.Destination, backupPath); err != nil {
-				return lerr.Wrap(lerr.CodeGenericError, err,
-					fmt.Sprintf("cannot stage existing project copy %s", item.replacement.Destination))
-			}
-			item.backup = backupPath
-		case errors.Is(err, os.ErrNotExist):
-			// a missing destination is the normal materialisation path.
-		default:
-			return lerr.Wrap(lerr.CodeGenericError, err,
-				fmt.Sprintf("cannot inspect %s", item.replacement.Destination))
-		}
-		if err := os.Rename(item.staged, item.replacement.Destination); err != nil {
-			return lerr.Wrap(lerr.CodeGenericError, err,
-				fmt.Sprintf("cannot publish project copy %s", item.replacement.Destination))
-		}
-		item.published = true
-	}
-
-	// publication is now committed. Backup cleanup failures must not roll
-	// back a complete checkout to a mixture of old and new trees.
-	finished = true
-	// one undeletable backup must not strand the rest, so every backup is
-	// attempted before the failures are reported together.
-	var cleanupErrors []error
-	for _, item := range staged {
-		if item.backup != "" {
-			if cleanupErr := os.RemoveAll(item.backup); cleanupErr != nil {
-				cleanupErrors = append(cleanupErrors, cleanupErr)
-			}
-		}
-	}
-	if cleanupErr := errors.Join(cleanupErrors...); cleanupErr != nil {
-		return lerr.Wrap(lerr.CodeInconsistency, cleanupErr,
-			"project copy updated but backup cleanup failed")
-	}
-	return nil
-}
-
-func unusedSiblingPath(parent, prefix string) (string, error) {
-	path, err := os.MkdirTemp(parent, prefix)
-	if err != nil {
-		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot reserve project-copy staging path")
-	}
-	if err := os.Remove(path); err != nil {
-		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot prepare project-copy staging path")
-	}
-	return path, nil
 }
 
 // CopyTree copies source to a new destination and publishes it atomically.
@@ -178,9 +60,9 @@ func stageTree(source, parent string) (string, error) {
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return "", lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot create %s", parent))
 	}
-	temporary, err := os.MkdirTemp(parent, ".lore-stage-*")
+	temporary, err := createStagingTree(parent)
 	if err != nil {
-		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot create temporary copy directory")
+		return "", err
 	}
 	complete := false
 	defer func() {
@@ -188,10 +70,6 @@ func stageTree(source, parent string) (string, error) {
 			_ = os.RemoveAll(temporary)
 		}
 	}()
-	if err := os.Chmod(temporary, 0o755); err != nil {
-		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot set temporary copy permissions")
-	}
-
 	err = filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -236,6 +114,163 @@ func stageTree(source, parent string) (string, error) {
 	}
 	complete = true
 	return temporary, nil
+}
+
+// StageSnapshot creates a sibling tree containing a merged snapshot.
+func StageSnapshot(destinationRoot string, snapshot Snapshot) (string, error) {
+	if err := validateSnapshot(snapshot); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(destinationRoot)
+	if err != nil {
+		return "", lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot inspect %s", destinationRoot))
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", lerr.Newf(lerr.CodeRefusedSafety, "agent directory %s must be a real directory", destinationRoot)
+	}
+	parent := filepath.Dir(destinationRoot)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", lerr.Wrap(lerr.CodeGenericError, err, fmt.Sprintf("cannot create %s", parent))
+	}
+	staged, err := createStagingTree(parent)
+	if err != nil {
+		return "", err
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			_ = os.RemoveAll(staged)
+		}
+	}()
+	err = filepath.WalkDir(destinationRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == destinationRoot || !entry.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(destinationRoot, path)
+		if err != nil {
+			return err
+		}
+		return os.Mkdir(filepath.Join(staged, relative), 0o755)
+	})
+	if err != nil {
+		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot prepare merge workspace")
+	}
+	if err := validateSnapshotCase(snapshot, staged); err != nil {
+		return "", err
+	}
+
+	paths := make([]string, 0, len(snapshot))
+	for path := range snapshot {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		if err := validateSnapshotPath(path); err != nil {
+			return "", lerr.Wrap(lerr.CodeInconsistency, err, "cannot materialise merged tree")
+		}
+		destination := filepath.Join(staged, filepath.FromSlash(path))
+		if info, statErr := os.Lstat(destination); statErr == nil && info.IsDir() {
+			if err := os.RemoveAll(destination); err != nil {
+				return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot replace merged directory path")
+			}
+		} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return "", lerr.Wrap(lerr.CodeGenericError, statErr, "cannot inspect merged path")
+		}
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot create merged tree directory")
+		}
+		entry := snapshot[path]
+		switch entry.Kind {
+		case KindFile:
+			mode := os.FileMode(0o644)
+			if entry.Executable {
+				mode = 0o755
+			}
+			if err := os.WriteFile(destination, entry.Data, mode); err != nil {
+				return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot write merged file")
+			}
+		case KindSymlink:
+			if err := os.Symlink(string(entry.Data), destination); err != nil {
+				return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot write merged symlink")
+			}
+		default:
+			return "", lerr.Newf(lerr.CodeInconsistency, "cannot materialise unknown entry kind %q", entry.Kind)
+		}
+	}
+	complete = true
+	return staged, nil
+}
+
+func createStagingTree(parent string) (string, error) {
+	temporary, err := os.MkdirTemp(parent, StagePathPrefix+"*")
+	if err != nil {
+		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot create temporary copy directory")
+	}
+	if err := os.Chmod(temporary, 0o755); err != nil {
+		_ = os.RemoveAll(temporary)
+		return "", lerr.Wrap(lerr.CodeGenericError, err, "cannot set temporary copy permissions")
+	}
+	return temporary, nil
+}
+
+func validateSnapshot(snapshot Snapshot) error {
+	for name := range snapshot {
+		if err := validateSnapshotPath(name); err != nil {
+			return lerr.Wrap(lerr.CodeInconsistency, err, "cannot materialise merged tree")
+		}
+		for parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(name))); parent != "."; parent = filepath.ToSlash(filepath.Dir(filepath.FromSlash(parent))) {
+			if _, exists := snapshot[parent]; exists {
+				return lerr.Newf(lerr.CodeRefusedSafety, "snapshot path %s conflicts with child path %s", parent, name)
+			}
+		}
+	}
+	return nil
+}
+
+func validateSnapshotPath(name string) error {
+	local := filepath.FromSlash(name)
+	if name == "" || name == "." || !filepath.IsLocal(local) {
+		return lerr.Newf(lerr.CodeInconsistency, "invalid snapshot path %q", name)
+	}
+	return nil
+}
+
+func validateSnapshotCase(snapshot Snapshot, staged string) error {
+	probeFile, err := os.CreateTemp(staged, ".lore-case-probe-")
+	if err != nil {
+		return lerr.Wrap(lerr.CodeGenericError, err, "cannot test merge workspace case handling")
+	}
+	probe := probeFile.Name()
+	if err := probeFile.Close(); err != nil {
+		_ = os.Remove(probe)
+		return lerr.Wrap(lerr.CodeGenericError, err, "cannot close merge workspace case probe")
+	}
+	_, statErr := os.Lstat(filepath.Join(staged, strings.ToUpper(filepath.Base(probe))))
+	if err := os.Remove(probe); err != nil {
+		return lerr.Wrap(lerr.CodeGenericError, err, "cannot remove merge workspace case probe")
+	}
+	if errors.Is(statErr, os.ErrNotExist) {
+		return nil
+	}
+	if statErr != nil {
+		return lerr.Wrap(lerr.CodeGenericError, statErr, "cannot test merge workspace case handling")
+	}
+	spellings := map[string]string{}
+	for name := range snapshot {
+		parts := strings.Split(filepath.ToSlash(name), "/")
+		for i := range parts {
+			spelling := strings.Join(parts[:i+1], "/")
+			folded := strings.ToLower(spelling)
+			if prior, exists := spellings[folded]; exists && prior != spelling {
+				return lerr.Newf(lerr.CodeRefusedSafety, "snapshot paths %s and %s collide on this filesystem", prior, spelling)
+			}
+			spellings[folded] = spelling
+		}
+	}
+	return nil
 }
 
 func copyRegularFile(source, destination string, executable bool) error {

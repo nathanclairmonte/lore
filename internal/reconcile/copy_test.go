@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -47,6 +48,43 @@ func TestCopyTreeRejectsSpecialFileWithoutPublishingDestination(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
 	require.NoDirExists(t, destination)
+}
+
+func TestStageSnapshotPreservesEmptyDirectoriesWithoutStaleFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".claude")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "empty", "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "stale.md"), []byte("stale"), 0o644))
+
+	staged, err := StageSnapshot(root, Snapshot{
+		"fresh.md": {Kind: KindFile, Data: []byte("fresh\n")},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(staged) })
+
+	require.DirExists(t, filepath.Join(staged, "empty", "nested"))
+	require.NoFileExists(t, filepath.Join(staged, "stale.md"))
+	data, err := os.ReadFile(filepath.Join(staged, "fresh.md"))
+	require.NoError(t, err)
+	require.Equal(t, "fresh\n", string(data))
+}
+
+func TestStageSnapshotRefusesCaseCollisionOnCaseInsensitiveFilesystem(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".claude")
+	require.NoError(t, os.Mkdir(root, 0o755))
+	probe := filepath.Join(root, "case-probe")
+	require.NoError(t, os.WriteFile(probe, nil, 0o600))
+	_, err := os.Lstat(filepath.Join(root, "CASE-PROBE"))
+	if errors.Is(err, os.ErrNotExist) {
+		t.Skip("filesystem is case-sensitive")
+	}
+	require.NoError(t, err)
+
+	_, err = StageSnapshot(root, Snapshot{
+		"Notes.md": {Kind: KindFile, Data: []byte("upper")},
+		"notes.md": {Kind: KindFile, Data: []byte("lower")},
+	})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeRefusedSafety, lerr.CodeOf(err))
 }
 
 func TestTreesEqualDetectsContentModeAndSymlinkChanges(t *testing.T) {
