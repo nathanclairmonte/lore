@@ -40,6 +40,9 @@ func openMutationContext() (*mutationContext, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := recoverProjectReplacement(&st); err != nil {
+		return nil, err
+	}
 	success = true
 	return &mutationContext{config: cfg, central: c, state: st, unlock: unlock}, nil
 }

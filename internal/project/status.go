@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/nathanclairmonte/lore/internal/central"
-	"github.com/nathanclairmonte/lore/internal/config"
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/reconcile"
 	"github.com/nathanclairmonte/lore/internal/state"
@@ -49,19 +48,12 @@ type DirSyncStatus struct {
 
 // Status inspects one named project or all tracked projects.
 func Status(projectName string) (StatusResult, error) {
-	st, _, err := state.Load()
+	ctx, err := openMutationContext()
 	if err != nil {
 		return StatusResult{}, err
 	}
-	cfg, _, err := config.Load()
-	if err != nil {
-		return StatusResult{}, err
-	}
-	c, err := openCentral(cfg.CentralRepo)
-	if err != nil {
-		return StatusResult{}, err
-	}
-	return statusFromState(st, c, projectName, "")
+	defer ctx.close()
+	return statusFromState(ctx.state, ctx.central, projectName, "")
 }
 
 func statusFromState(st state.State, c *central.Central, projectName, checkoutPath string) (StatusResult, error) {
@@ -81,6 +73,17 @@ func statusFromState(st state.State, c *central.Central, projectName, checkoutPa
 			entry.Checkouts = []state.CheckoutEntry{checkout}
 			st.Projects[projectName] = entry
 		}
+	}
+	checkoutPaths := []string{}
+	for name, entry := range st.Projects {
+		if projectName == "" || name == projectName {
+			for _, checkout := range entry.Checkouts {
+				checkoutPaths = append(checkoutPaths, checkout.Path)
+			}
+		}
+	}
+	if err := detectOrphanProjectReplacementPaths(checkoutPaths); err != nil {
+		return StatusResult{}, err
 	}
 	head, err := c.HeadSHA()
 	if err != nil {
