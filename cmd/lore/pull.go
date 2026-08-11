@@ -1,6 +1,7 @@
 package main
 
 import (
+	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/output"
 	"github.com/nathanclairmonte/lore/internal/project"
 	"github.com/spf13/cobra"
@@ -18,9 +19,13 @@ Bare pull targets the checkout containing the current directory. A named
 pull targets every recorded checkout for that project. Use --path to adopt
 or correct one exact checkout. Use --all to scan configured project roots.
 
-This command handles missing, matching, and central-ahead copies. It refuses
-divergence rather than overwriting either side. Pull never contacts a Git
-remote. Use plain Git in the central repository for remote pulls.`,
+This command handles missing, matching, central-ahead, and diverged copies.
+Diverged text is merged against the recorded base. Unresolved text conflicts
+receive markers, while binary conflicts keep both files. Use --central or
+--project to choose one whole-reconcile direction explicitly.
+
+Pull never contacts a Git remote. Use plain Git in the central repository for
+remote pulls.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
@@ -38,11 +43,20 @@ remote. Use plain Git in the central repository for remote pulls.`,
 				}
 				output.PrintPullGitignoreWarnings(pullResultForOutput(result))
 			}
-			return err
+			if err != nil {
+				return err
+			}
+			if result.HasConflicts() {
+				return lerr.New(lerr.CodeInconsistency, "pull wrote unresolved conflicts").
+					WithHint("resolve the reported conflict files, remove any .sync-conflict siblings after choosing content, then run `lore push --project-from-cwd`")
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&opts.Path, "path", "", "use or adopt one exact checkout path")
 	cmd.Flags().BoolVar(&opts.All, "all", false, "scan projects_roots and pull every tracked project found")
+	cmd.Flags().BoolVar(&opts.Central, "central", false, "choose committed central content for every difference")
+	cmd.Flags().BoolVar(&opts.Project, "project", false, "keep project content for every difference")
 	return cmd
 }
 
@@ -68,9 +82,16 @@ func pullResultForOutput(result project.PullResult) output.PullResult {
 				checkoutOut.Error = checkout.Err.Error()
 			}
 			for _, dir := range checkout.Dirs {
-				checkoutOut.Dirs = append(checkoutOut.Dirs, output.PullDirResult{
+				dirOut := output.PullDirResult{
 					Name: dir.Name, Path: dir.Path, Status: output.PullDirStatus(dir.Status), Unignored: dir.Unignored,
-				})
+					Conflicts: []output.PullConflictResult{},
+				}
+				for _, conflict := range dir.Conflicts {
+					dirOut.Conflicts = append(dirOut.Conflicts, output.PullConflictResult{
+						Path: conflict.Path, Kind: string(conflict.Kind), SiblingPath: conflict.SiblingPath,
+					})
+				}
+				checkoutOut.Dirs = append(checkoutOut.Dirs, dirOut)
 			}
 			projectOut.Checkouts = append(projectOut.Checkouts, checkoutOut)
 		}
