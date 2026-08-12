@@ -557,6 +557,26 @@ func TestJSONMode_PrintAddResult(t *testing.T) {
 	require.Empty(t, got.Dirs[0].Violations)
 }
 
+func TestJSONMode_MoveAndRmExposePartialFailure(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+
+	PrintMoveResult(MoveResult{ProjectName: "renamed", Checkouts: []MoveCheckoutResult{}}, false)
+	var moveEnvelope struct {
+		OK bool `json:"ok"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &moveEnvelope))
+	require.False(t, moveEnvelope.OK)
+
+	out.Reset()
+	PrintRmResult(RmResult{ProjectName: "removed", Copies: []RmCopyResult{}}, false)
+	var rmEnvelope struct {
+		OK bool `json:"ok"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &rmEnvelope))
+	require.False(t, rmEnvelope.OK)
+}
+
 // --- color/no-color toggling -----------------------------------------
 //
 // Goldens above are captured with color OFF to keep fixtures plain
