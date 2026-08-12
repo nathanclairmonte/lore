@@ -12,7 +12,6 @@ import (
 // Two persistent flags are wired here:
 //
 //   - --json: switches every data-returning command to its JSON envelope.
-//     Slice 03 wires `lore path`; slice 21 extends to ls/status/doctor.
 //     Human-mode printers (Success/Warn/PrintAddResult/...) become no-ops
 //     under --json so script callers see only the documented envelope.
 //   - --no-color: disables ANSI styling. Honored in addition to the
@@ -53,9 +52,9 @@ func newRootCmd() *cobra.Command {
 		"Disable ANSI color output (NO_COLOR env var is also honored)")
 	root.AddCommand(newInitCmd())
 	root.AddCommand(newAddCmd())
-	root.AddCommand(newLinkCmd())
+	root.AddCommand(newLsCmd())
+	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newPathCmd())
-	root.AddCommand(newUnlinkCmd())
 	root.AddCommand(newRmCmd())
 	root.AddCommand(newMvCmd())
 	root.AddCommand(newStatusCmd())

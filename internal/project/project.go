@@ -27,7 +27,7 @@ const (
 	// StatusAdded is set when the dir was freshly onboarded in this run.
 	StatusAdded DirStatus = "added"
 	// StatusAlreadyTracked is set when state already mapped the dir to
-	// central and the on-disk symlink is valid; the dir is reported but
+	// central and the project copy is valid; the dir is reported but
 	// no side effects fired for it.
 	StatusAlreadyTracked DirStatus = "already-tracked"
 	// StatusSkippedSafety is set when a slice-3 safety check refused this
@@ -93,27 +93,6 @@ func (r AddResult) AllAlreadyTracked() bool {
 	return true
 }
 
-// Add onboards a project: detects agent dirs, refuses dirs that fail
-// slice-3 safety gates, prompts the slice-4 gitignore picker per non-
-// ignored dir, moves each clean dir into the central repo, symlinks it
-// back, records the path-and-dir in state, and commits ONCE with
-// commit.add_template covering every dir added in this run.
-//
-// Per-dir semantics: a safety violation on one candidate skips just that
-// dir; clean dirs in the same invocation still onboard. Infra failures
-// (central, state, commit) unwind every dir added in this run. Add
-// returns CodeRefusedSafety if any candidate failed safety, even when
-// other candidates succeeded - the cmd layer renders the per-dir result
-// before propagating the exit code so the user sees what was committed
-// alongside what was refused.
-//
-// Idempotent: re-running on a fully-tracked project (or any subset of
-// already-tracked dirs) returns AddResult with every selected dir's
-// status set to StatusAlreadyTracked and nil error.
-//
-// `opts.Dirs` scopes which agent dirs to handle; an empty slice means
-// "all detected agent dirs at the project root plus any already tracked
-// in central".
 // Path returns the absolute on-disk path of an agent directory tracked
 // for projectName inside the central repo. When dirName is empty:
 // returns the single tracked dir's path, or CodeConflict if the project
@@ -482,10 +461,7 @@ func unignoredDirs(projectPath string, names []string) map[string]bool {
 // verified. Any non-interactive context, a declined picker, a write failure,
 // or a still-not-ignored re-check returns false so the caller leaves an
 // advisory warning.
-//
-// trimTrailingSlash serves the legacy symlink model, where the managed path is
-// a symlink rather than the real directory ignorePatternFor writes for.
-func applyGitignorePicker(dirName, projectPath, repoTop string, trimTrailingSlash bool) bool {
+func applyGitignorePicker(dirName, projectPath, repoTop string) bool {
 	target, err := pickGitignoreTarget(dirName)
 	if err != nil {
 		return false
@@ -495,9 +471,6 @@ func applyGitignorePicker(dirName, projectPath, repoTop string, trimTrailingSlas
 		return false
 	}
 	pattern := ignorePatternFor(target, dirName, projectPath, repoTop)
-	if trimTrailingSlash {
-		pattern = strings.TrimSuffix(pattern, "/")
-	}
 	if err := git.AppendIgnoreEntry(targetPath, pattern); err != nil {
 		return false
 	}
