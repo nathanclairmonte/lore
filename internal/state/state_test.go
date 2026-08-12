@@ -103,6 +103,40 @@ func TestRecordCheckoutValidatesPathAndSHA(t *testing.T) {
 	require.Error(t, st.RecordCheckout("my-app", "/absolute/path", "short"))
 }
 
+func TestRecordCheckoutRejectsPathOwnedByAnotherProject(t *testing.T) {
+	st := validState(t)
+	require.NoError(t, st.AddAgentDir("other", ".claude"))
+	err := st.RecordCheckout("other", "/home/x/code/my-app", testSHA)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "already recorded for project \"my-app\"")
+}
+
+func TestLoadRejectsPathOwnedByTwoProjects(t *testing.T) {
+	root := stateSandbox(t)
+	path := filepath.Join(root, stateFileRelPath)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(`schema_version = 3
+
+[projects.first]
+agent_dirs = [".claude"]
+
+[[projects.first.checkouts]]
+path = "/shared/project"
+sync_base = "0123456789abcdef0123456789abcdef01234567"
+
+[projects.second]
+agent_dirs = [".claude"]
+
+[[projects.second.checkouts]]
+path = "/shared/project"
+sync_base = "0123456789abcdef0123456789abcdef01234567"
+`), 0o644))
+
+	_, _, err := Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "for both")
+}
+
 func TestRemoveAgentDirKeepsCheckoutsUntilProjectIsEmpty(t *testing.T) {
 	st := validState(t)
 	require.NoError(t, st.AddAgentDir("my-app", ".cursor"))

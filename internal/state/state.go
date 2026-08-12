@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -49,6 +50,7 @@ const (
 type validationIssue struct {
 	kind     validationIssueKind
 	project  string
+	other    string
 	checkout CheckoutEntry
 	err      error
 }
@@ -109,7 +111,7 @@ func Load() (st State, exists bool, err error) {
 		return State{}, false, lerr.Newf(lerr.CodeInconsistency,
 			"state file at %s is schema version %d, but this lore expects %d",
 			path, st.SchemaVersion, CurrentSchemaVersion).
-			WithHint("delete the stale state file and any legacy project symlinks, then run `lore pull --all`")
+			WithHint("delete the stale state file, replace any legacy top-level links with real directories, then run `lore pull --all`")
 	}
 	// enforce invariants at the trust boundary so invalid state fails here.
 	if issue := validateProjects(st.Projects); issue != nil {
@@ -152,6 +154,18 @@ func (s *State) CheckoutForPath(name, projectPath string) (CheckoutEntry, bool) 
 		}
 	}
 	return CheckoutEntry{}, false
+}
+
+// CheckoutOwner returns the project that owns an exact checkout path.
+func (s *State) CheckoutOwner(projectPath string) (string, bool) {
+	for name, entry := range s.Projects {
+		for _, checkout := range entry.Checkouts {
+			if checkout.Path == projectPath {
+				return name, true
+			}
+		}
+	}
+	return "", false
 }
 
 // Clone returns a copy of s safe to mutate independently. Projects is a map
@@ -210,6 +224,10 @@ func (s *State) RecordCheckout(name, projectPath, syncBase string) error {
 		return lerr.Newf(lerr.CodeInconsistency,
 			"project %q has no agent directories recorded", name)
 	}
+	if owner, exists := s.CheckoutOwner(projectPath); exists && owner != name {
+		return lerr.Newf(lerr.CodeConflict,
+			"checkout %s is already recorded for project %q", projectPath, owner)
+	}
 	for i, existing := range entry.Checkouts {
 		if existing.Path == projectPath {
 			entry.Checkouts[i] = checkout
@@ -236,6 +254,25 @@ func (s *State) RemoveCheckout(name, projectPath string) {
 		return
 	}
 	s.Projects[name] = entry
+}
+
+// RenameProject moves a project entry without changing its checkout data.
+func (s *State) RenameProject(oldName, newName string) error {
+	entry, ok := s.Projects[oldName]
+	if !ok {
+		return lerr.Newf(lerr.CodeNotFound, "project %q is not recorded in local state", oldName)
+	}
+	if _, exists := s.Projects[newName]; exists {
+		return lerr.Newf(lerr.CodeConflict, "project %q is already recorded in local state", newName)
+	}
+	delete(s.Projects, oldName)
+	s.Projects[newName] = entry
+	return nil
+}
+
+// RemoveProject drops every checkout record for a project.
+func (s *State) RemoveProject(name string) {
+	delete(s.Projects, name)
 }
 
 // RemoveAgentDir drops dirName from name's tracked set. If the removal
@@ -286,26 +323,32 @@ func validateCheckout(checkout CheckoutEntry) error {
 }
 
 func validateProjects(projects map[string]ProjectEntry) *validationIssue {
-	for name, entry := range projects {
+	seen := map[string]string{}
+	names := make([]string, 0, len(projects))
+	for name := range projects {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		entry := projects[name]
 		if len(entry.AgentDirs) == 0 {
 			return &validationIssue{kind: missingAgentDirs, project: name}
 		}
 		if len(entry.Checkouts) == 0 {
 			return &validationIssue{kind: missingCheckouts, project: name}
 		}
-		seen := map[string]struct{}{}
 		for _, checkout := range entry.Checkouts {
 			if err := validateCheckout(checkout); err != nil {
 				return &validationIssue{
 					kind: invalidCheckout, project: name, checkout: checkout, err: err,
 				}
 			}
-			if _, ok := seen[checkout.Path]; ok {
+			if other, ok := seen[checkout.Path]; ok {
 				return &validationIssue{
-					kind: duplicateCheckout, project: name, checkout: checkout,
+					kind: duplicateCheckout, project: name, other: other, checkout: checkout,
 				}
 			}
-			seen[checkout.Path] = struct{}{}
+			seen[checkout.Path] = name
 		}
 	}
 	return nil
@@ -327,9 +370,15 @@ func (issue *validationIssue) loadError(path string) error {
 			path, issue.project, issue.err).
 			WithHint("delete the file and run `lore pull --all`")
 	case duplicateCheckout:
+		if issue.other == issue.project {
+			return lerr.Newf(lerr.CodeInconsistency,
+				"state file at %s records checkout %s more than once for project %q",
+				path, issue.checkout.Path, issue.project).
+				WithHint("delete the duplicate checkout and retry")
+		}
 		return lerr.Newf(lerr.CodeInconsistency,
-			"state file at %s records checkout %s more than once for project %q",
-			path, issue.checkout.Path, issue.project).
+			"state file at %s records checkout %s for both %q and %q",
+			path, issue.checkout.Path, issue.other, issue.project).
 			WithHint("delete the duplicate checkout and retry")
 	default:
 		panic("unknown state validation issue")
@@ -345,9 +394,14 @@ func (issue *validationIssue) saveError() error {
 		return lerr.Newf(lerr.CodeInconsistency,
 			"cannot save invalid checkout for project %q: %s", issue.project, issue.err)
 	case duplicateCheckout:
+		if issue.other == issue.project {
+			return lerr.Newf(lerr.CodeInconsistency,
+				"cannot save duplicate checkout %s for project %q",
+				issue.checkout.Path, issue.project)
+		}
 		return lerr.Newf(lerr.CodeInconsistency,
-			"cannot save duplicate checkout %s for project %q",
-			issue.checkout.Path, issue.project)
+			"cannot save checkout %s for both %q and %q",
+			issue.checkout.Path, issue.other, issue.project)
 	default:
 		panic("unknown state validation issue")
 	}
