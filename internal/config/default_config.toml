@@ -1,7 +1,7 @@
 # Path to the central agent-context repository.
 central_repo = "~/agent-context"
 
-# Roots that `lore link --all` scans for project checkouts.
+# roots that `lore pull --all` scans for project checkouts.
 # Supports multiple roots for developers whose projects live in
 # more than one parent directory.
 projects_roots = [

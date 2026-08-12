@@ -279,7 +279,7 @@ func preflightPush(status StatusResult) error {
 
 // checkoutFromCWD resolves the tracked checkout containing the current
 // directory. Nesting resolves to the innermost checkout, matching how
-// `lore link` resolves a project from cwd.
+// cwd-scoped push resolves a project from its recorded checkout path.
 func checkoutFromCWD(st state.State) (name, path string, err error) {
 	cwd, err := os.Getwd()
 	if err != nil {

@@ -1,5 +1,4 @@
-// Package output formats lore's human-mode output and (in slice 21's full
-// polish) its JSON output. All command handlers route through this
+// Package output formats lore's human and JSON output. All command handlers route through this
 // package so styling, glyph fallbacks, and mode selection live in one
 // place.
 //
@@ -15,8 +14,7 @@
 //  3. JSON mode (--json): human-mode printers (Success, Warn, Hint,
 //     PrintAddResult, PrintInitResult, PrintError) suppress all human
 //     output. Data-returning commands emit a documented JSON envelope
-//     instead. Slice 21 wires every data command; slice 03 lands the
-//     plumbing and wires `lore path`.
+//     instead.
 //
 // Concurrency: mode, colorOverride, unicodeOverride, Out, and Err are
 // package-level mutable globals. This is intentional for a single-process

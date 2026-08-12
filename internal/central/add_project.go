@@ -154,9 +154,8 @@ func (c *Central) ProjectPath(name, dirName string) string {
 // the .gitkeep placeholder and any non-directory entries. Returns an
 // empty slice (never nil-vs-empty surprises) when nothing is tracked.
 //
-// central is the authority on which projects exist; `lore link --all`
-// enumerates from here rather than from local state so a project tracked
-// in central but never linked on this machine still gets located.
+// central is the authority on which projects exist; pull and list enumerate
+// from here so projects that are not placed on this machine remain visible.
 func (c *Central) ListProjects() ([]string, error) {
 	projectsDir := filepath.Join(c.Path, "projects")
 	entries, err := os.ReadDir(projectsDir)
@@ -185,7 +184,7 @@ func (c *Central) ListProjects() ([]string, error) {
 // CodeNotFound when the project dir is missing or empty.
 //
 // The sorted result is the source of truth for "what dirs does this
-// project have?" — state's per-project AgentDirs is a cache populated
+// project have?". State's per-project AgentDirs is a cache populated
 // from this when state was migrated from v1 or when the orchestrator
 // needs to backfill.
 func (c *Central) ProjectAgentDirs(name string) ([]string, error) {

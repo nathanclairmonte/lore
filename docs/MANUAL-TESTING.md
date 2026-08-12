@@ -1,161 +1,105 @@
 # Manual testing
 
-Recipes for the bits of `lore` that aren't exercised by the Go test suite — typically interactive terminal flows that can't be driven from `go test` without a real TTY.
+Use these recipes for interactive terminal behavior that the Go tests cannot drive through a real TTY.
 
-Sections are organised by slice. When a slice's manual procedure stops being relevant (because automated coverage caught up, or the feature changed), retire the section instead of letting it rot.
+## Setup
 
----
-
-## `lore-dev` and prerequisites
-
-All recipes here use `lore-dev`, the dev-loop shim. It's a tiny script at `$HOME/.local/bin/lore-dev` that runs `go run ./cmd/lore` against the current repo — so every invocation reflects the source tree on disk, no rebuild needed.
-
-**Before any manual testing, run once from the repo root:**
+Run from the repository root:
 
 ```bash
 task setup
-```
-
-That installs `lore-dev` (idempotent — re-run after moving the repo). Make sure `$HOME/.local/bin` is on your `$PATH`.
-
-The setup task also warns if `$HOME/.local/bin` isn't on your `$PATH`. Fix that warning before continuing.
-
----
-
-## Slice 4 — `lore add` gitignore picker
-
-When the agent dir of a project isn't gitignored, `lore add` opens an interactive picker offering three targets (repo `.gitignore`, global excludes, `.git/info/exclude`). All three write paths are unit-tested with a stubbed picker, but the real `huh` form against a real TTY is only exercised by hand.
-
-### Prerequisites
-
-1. `task setup` has been run (see the section above).
-2. `lore-dev init` has been run at least once. Accept the default `~/agent-context` or point it at your preferred location — see [Pointing init at a custom path](#pointing-init-at-a-custom-path) below.
-3. The default agent dir name used by these recipes (`.codex`) is not already in your global gitignore. Verify with:
-
-   ```bash
-   git -C /tmp check-ignore -v .codex
-   ```
-
-   Should print nothing. If `.codex` is in your global rules (e.g. `~/.gitignore_global` referenced via `core.excludesFile`, or `~/.config/git/ignore`), pick a different default agent dir that's clean for you and adapt `scripts/smoke-picker-reset.sh` + the verification steps below.
-
-### Pointing init at a custom path
-
-`lore init` interactive support is scoped to slice 14. Until then, the workaround is to pre-create the config file before running `init`:
-
-```bash
-mkdir -p ~/.config/lore
-cat > ~/.config/lore/config.toml <<EOF
-central_repo = "/your/preferred/path/agent-context"
-projects_roots = ["~/Canonical/git-repos", "~/PersonalProjects/git-repos"]
-projects_root_depth = 2
-agent_dirs = [".agents", ".claude", ".codex", ".cursor"]
-[commit]
-auto = true
-add_template     = "feat: add {project}"
-rm_template      = "chore: remove {project}"
-mv_template      = "refactor: rename {old} to {new}"
-sync_template    = "chore: sync ({projects})"
-EOF
 lore-dev init
 ```
 
-Running `init` with a config that points at a non-existent directory hits the "configured but central dir missing" branch, asks you to confirm re-creating at the configured path, and writes the central repo there.
+`task setup` installs the `lore-dev` shim. It runs the current source through `go run ./cmd/lore`.
 
-### Reset between scenarios
-
-Each scenario assumes a clean sandbox. Reset with:
+Create a disposable project when a recipe needs one:
 
 ```bash
-task smoke:picker-reset
+mkdir -p /tmp/lore-smoke/demo-project/.codex
+git -C /tmp/lore-smoke/demo-project init
+printf 'context\n' > /tmp/lore-smoke/demo-project/.codex/AGENTS.md
 ```
 
-This wipes `/tmp/lore-smoke/demo-project`, the central's copy under `projects/demo-project/`, and lore's state file; then rebuilds a fresh `demo-project` with `.codex/` as the agent dir. The script lives at `scripts/smoke-picker-reset.sh` if you want to read or adapt it.
+## Gitignore picker
 
-The script will refuse with a hint if `lore-dev` isn't installed or no central repo exists yet, pointing you back at `task setup` or `lore-dev init`.
-
-### Scenario 1 — pick "repo .gitignore" (default)
+Ensure `.codex/` is not already ignored, then run:
 
 ```bash
-task smoke:picker-reset
 lore-dev add /tmp/lore-smoke/demo-project
 ```
 
-- **Picker:** three options, "Append to repo .gitignore (survives clones)" pre-selected. Press Enter.
-- **Verify:**
-  - `cat /tmp/lore-smoke/demo-project/.gitignore` is exactly `.codex`
-  - `/tmp/lore-smoke/demo-project/.codex` is a symlink into central
-  - `git -C /tmp/lore-smoke/demo-project status` shows only `.gitignore` as untracked (NOT `.codex`)
-  - Central commit landed: `git -C "$(lore-dev path --repo)" log --oneline | head -1` shows `feat: add demo-project`
+Verify each picker choice separately:
 
-### Scenario 2 — pick "global gitignore"
+- Repository `.gitignore`: the file contains `/.codex/`.
+- Global excludes: the configured global ignore file contains `.codex/`.
+- `.git/info/exclude`: that file contains `/.codex/`.
+- Escape or Ctrl+C: add exits 5 and does not create a central project.
 
-```bash
-task smoke:picker-reset
-lore-dev add /tmp/lore-smoke/demo-project
-```
-
-- **Picker:** arrow-down once, Enter.
-- **Verify:**
-  - Confirmation line: `✓ added .codex to <your global excludes path>`
-  - The global excludes file (whatever `git config --global --get core.excludesFile` returns, or `~/.config/git/ignore` if unset) now ends with `.codex`
-  - `cat /tmp/lore-smoke/demo-project/.gitignore` returns "no such file"
-  - `git -C /tmp/lore-smoke/demo-project status` shows no untracked entries
-- **Cleanup (important — this leaks into your real global gitignore):**
-  ```bash
-  sed -i '/^\.codex$/d' "$(git config --global --get core.excludesFile)"
-  # if core.excludesFile is unset, edit ~/.config/git/ignore instead
-  ```
-
-### Scenario 3 — pick `.git/info/exclude`
+After a successful choice, verify that both copies are real directories:
 
 ```bash
-task smoke:picker-reset
-lore-dev add /tmp/lore-smoke/demo-project
+test -d /tmp/lore-smoke/demo-project/.codex
+test ! -L /tmp/lore-smoke/demo-project/.codex
+test -f "$(lore-dev path demo-project)/AGENTS.md"
+git -C /tmp/lore-smoke/demo-project status --short
 ```
 
-- **Picker:** arrow-down twice, Enter.
-- **Verify:**
-  - Confirmation line: `✓ added .codex to /tmp/lore-smoke/demo-project/.git/info/exclude`
-  - `cat /tmp/lore-smoke/demo-project/.git/info/exclude` ends with `.codex`
-  - `cat /tmp/lore-smoke/demo-project/.gitignore` returns "no such file"
-  - `git -C /tmp/lore-smoke/demo-project status` shows no untracked entries
+The project status must not include `.codex/`.
 
-### Scenario 4 — dismiss with Ctrl+C or ESC
+## Copy reconciliation
+
+Edit the project copy, then capture it:
 
 ```bash
-task smoke:picker-reset
-lore-dev add /tmp/lore-smoke/demo-project
-# press ESC or Ctrl+C at the picker
-echo $?
+printf 'project edit\n' >> /tmp/lore-smoke/demo-project/.codex/AGENTS.md
+lore-dev status demo-project
+lore-dev push --project demo-project
 ```
 
-- **Exit code:** `5` (CodeRefusedSafety)
-- **Error message:** mentions "must be gitignored"
-- **Disk state:**
-  - `/tmp/lore-smoke/demo-project/.gitignore` does NOT exist (no stray write)
-  - `/tmp/lore-smoke/demo-project/.codex` is still a real directory (not a symlink — lore didn't proceed)
-  - No `projects/demo-project/` directory under central
-  - No new commit on central's HEAD
-
-### Scenario 5 — non-TTY refuses
+Edit and commit the central copy, then receive it:
 
 ```bash
-task smoke:picker-reset
-lore-dev add /tmp/lore-smoke/demo-project < /dev/null
-echo $?
+printf 'central edit\n' >> "$(lore-dev path demo-project)/AGENTS.md"
+git -C "$(lore-dev path --repo)" add -A
+git -C "$(lore-dev path --repo)" commit -m 'test: central edit'
+cd /tmp/lore-smoke/demo-project
+lore-dev pull demo-project
 ```
 
-- **Exit code:** `7` (CodeInconsistency)
-- **Error message:** mentions "stdin is not a terminal"
-- **Disk state:** same as scenario 4 (no writes, no symlink, no central state)
+Verify that `lore-dev status demo-project` reports `in-sync`.
 
-### Final cleanup
+## Rename and removal
+
+Rename the central project without moving local files:
 
 ```bash
-rm -rf /tmp/lore-smoke
-rm -rf "$(lore-dev path --repo)"
-rm -rf ~/.config/lore
-rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/lore"
+lore-dev mv demo-project demo-renamed
+test -d /tmp/lore-smoke/demo-project/.codex
+lore-dev ls
 ```
 
-If you ran scenario 2 and didn't clean up your global excludes inline, do it now (see the cleanup snippet in scenario 2).
+Default removal must keep the project copy:
+
+```bash
+lore-dev rm demo-renamed
+test -d /tmp/lore-smoke/demo-project/.codex
+```
+
+Repeat setup to test purge. Add an unsynced file and run `lore-dev rm demo-project --purge`. The command must refuse after confirmation. Re-run with `--force` only in the disposable sandbox. The `.codex/` directory must then be absent.
+
+## Doctor repair
+
+With a tracked disposable project, remove one project-copy directory and run:
+
+```bash
+lore-dev doctor
+lore-dev doctor --fix
+lore-dev status demo-project
+```
+
+The first command exits 7. The fix restores the missing directory from committed central content. The final status reports `in-sync`.
+
+## Cleanup
+
+Remove the disposable project and any test-only global ignore rule. Do not remove a real central repository or real lore state during cleanup.

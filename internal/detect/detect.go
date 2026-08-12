@@ -23,13 +23,9 @@ type AgentDir struct {
 // the order in candidates so callers control precedence via
 // config.AgentDirs and `lore add` preserves a stable per-run order.
 //
-// Symlinked candidates are intentionally skipped: an agent dir that's
-// already a symlink is the post-add steady state (lore replaces the
-// directory with a symlink into central), so detecting them would re-
-// onboard tracked projects. The slice-3 symlink safety case is surfaced
-// by CheckSafetyAll when the user passes such a name explicitly via
-// `--dir`; in auto-detect mode we silently skip, matching slice 3's
-// "lore polices what it manages" stance.
+// Symlinked candidates are intentionally skipped. A top-level link cannot
+// satisfy the project-copy contract. CheckSafetyAll handles it when the user
+// requests that candidate explicitly through `--dir`.
 //
 // Returns an empty slice when nothing matches (never a nil-vs-empty
 // distinction). Errors only on unexpected stat failures (permission etc).

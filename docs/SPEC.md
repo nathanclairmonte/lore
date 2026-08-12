@@ -25,7 +25,7 @@
 
 ## Origin and problem statement
 
-Many developers maintain per-project agentic AI context — a `.claude/` directory (or `.agents/`, `.cursor/`, etc.) containing `CLAUDE.md`, prompts, examples, project lore, scratch notes, and accumulated rules. These directories are often globally gitignored because the contents are personal and not appropriate for team-shared org repos, but they're also valuable knowledge that should survive laptop loss, machine migrations, and accidental deletion.
+Many developers maintain per-project agentic AI context: a `.claude/` directory (or `.agents/`, `.cursor/`, etc.) containing `CLAUDE.md`, prompts, examples, project lore, scratch notes, and accumulated rules. These directories are often globally gitignored because the contents are personal and not appropriate for team-shared org repos, but they're also valuable knowledge that should survive laptop loss, machine migrations, and accidental deletion.
 
 The problem: how do you version-control personal per-project agentic AI context **without** committing it to the project's main repository?
 
@@ -37,9 +37,9 @@ The naive solutions all have rough edges:
 - **Manual dotfiles-style symlinks:** works but is error-prone and tedious to onboard new projects.
 - **chezmoi or similar:** powerful, but mostly solves a different problem (per-machine config templating) and the symlink-only use case is a small slice of its surface area.
 
-`lore` is a small, focused CLI for exactly this workflow: a single private central repository stores all your per-project agentic AI context, organized by project, and symlinked into each project on disk. Each project sees its agent directory as if it were local; the source of truth lives in one git repo that's easy to back up, sync across machines, and recover from.
+`lore` is a small, focused CLI for exactly this workflow. A private central repository stores every central copy. Each checkout contains a real project copy. Lore reconciles the two against a recorded sync-base, while plain Git moves central commits between machines.
 
-The name comes from the metaphor: the unwritten knowledge about how a codebase actually works — its quirks, conventions, history, gotchas — is the project's *lore*. `lore add`, `lore list`, `lore status` all read as natural English.
+The name comes from the metaphor: the unwritten knowledge about how a codebase actually works, including its quirks, conventions, history, and gotchas, is the project's *lore*. `lore add`, `lore ls`, and `lore status` form a direct command vocabulary.
 
 ---
 
@@ -60,7 +60,7 @@ The name comes from the metaphor: the unwritten knowledge about how a codebase a
 - Not a dotfiles manager. Adjacent problem, different tool. If you want machine-specific templating or encrypted secrets, use chezmoi or sops.
 - Not a knowledge-base search engine (yet). See [future work](#future-work).
 - Not a network/cloud service. Distribution is via git only.
-- Not opinionated about the contents of agent directories. `lore` moves and symlinks them; what's inside is the user's business.
+- Not opinionated about the contents of agent directories. Lore copies them byte-for-byte; their contents are the user's business.
 
 ---
 
@@ -120,7 +120,7 @@ Location: `~/.config/lore/config.toml` (follows XDG Base Directory spec).
 # Path to the central agent-context repository.
 central_repo = "~/agent-context"
 
-# Roots that `lore link --all` scans for project checkouts.
+# Roots that `lore pull --all` scans for project checkouts.
 # Supports multiple roots for developers whose projects live in
 # more than one parent directory.
 projects_roots = [
@@ -156,7 +156,7 @@ Default style for commit messages: lowercase conventional-commits format.
 
 Location: `~/.local/state/lore/state.toml`.
 
-This file is **not** committed anywhere. It is per-machine. Each checkout has its own sync-base.
+This file is **not** committed anywhere. It is per-machine. Each checkout has its own sync-base. An absolute checkout path can belong to only one project.
 
 ```toml
 # Schema version for forward compatibility.
@@ -174,7 +174,7 @@ path = "/home/nathan/worktrees/my-nextjs-app-feature"
 sync_base = "89abcdef0123456789abcdef0123456789abcdef"
 ```
 
-Schema v3 replaces the existing v2 layout. Version 2 already stored each project's agent-directory set, so the copy-model state could not safely reuse that version number. Lore rejects older schemas and does not migrate them. To start fresh, delete the incompatible state file and any legacy project symlinks, then run `lore pull --all` to rebuild current state from central and the configured project roots.
+Schema v3 replaces the existing v2 layout. Version 2 already stored each project's agent-directory set, so the copy-model state could not safely reuse that version number. Lore rejects older schemas and does not migrate them. To start fresh, delete the incompatible state file, replace any legacy top-level links with real directories, then run `lore pull --all` to rebuild current state from central and the configured project roots.
 
 ---
 
@@ -185,7 +185,7 @@ Schema v3 replaces the existing v2 layout. Version 2 already stored each project
 - Every command supports `--help`.
 - Every command that returns data supports `--json` for structured output.
 - Every command is **idempotent**: safe to re-run.
-- Exit codes are **global and semantic** — the same code means the same *class* of failure across every subcommand. The exact cause goes in the stderr message; the code lets scripts and agents decide how to react.
+- Exit codes are **global and semantic**: the same code means the same *class* of failure across every subcommand. The exact cause goes in the stderr message; the code lets scripts and agents decide how to react.
 - Commands that mutate state always echo what they did, and (where applicable) what the user should do next.
 
 #### Exit code table
@@ -196,9 +196,9 @@ Schema v3 replaces the existing v2 layout. Version 2 already stored each project
 | 1 | Generic error | Catch-all for unexpected failures |
 | 2 | Setup missing | No central repo, no config, lore not initialized |
 | 3 | Not found | Project not tracked, checkout doesn't exist, agent dir absent, cwd not inside a tracked project |
-| 4 | Conflict / already exists | Project already tracked, name collision, symlink at expected location pointing elsewhere |
+| 4 | Conflict / already exists | Project already tracked, name collision, destination already exists |
 | 5 | Refused for safety | Agent dir contains tracked files, agent dir is a symlink, nested `.git` present, gitignore picker dismissed |
-| 6 | Git / network failure | Central is behind remote (refused push), `git` operation failed, clone failed |
+| 6 | Git / network failure | Git operation failed, clone failed |
 | 7 | Inconsistency / unhealthy | `lore doctor` found unfixed problems, `lore status` found divergence or unhealthy copy state, broken config (e.g. empty `central_repo`), interactive prompt required but stdin is not a terminal |
 
 ### `lore init`
@@ -229,7 +229,7 @@ lore init --no-interactive                               # use all defaults, no 
 - With `--from`: `git clone` the remote to `central_repo`. Write the config.
 - If `--path <path>` is passed and `<path>` already contains a git repo, **adopt** it rather than re-initializing. Lets users point lore at a manually-prepared repo.
 - If `--path` is passed, **update `central_repo` in config to the new path** (even if a previous central repo was configured elsewhere). The previous repo on disk is left untouched; switch back later via `lore use <old-path>` or another `lore init --path`.
-- If a config already exists AND no `--path` is passed AND the configured central repo dir already exists → refuse with `*central repo already configured at <path>. Use `lore init --path <new-path>` to switch, `lore use <existing-path>` to point lore at an existing repo, or remove the directory first.*` (Exit 4 — conflict.)
+- If a config already exists AND no `--path` is passed AND the configured central repo dir already exists → refuse with `*central repo already configured at <path>. Use `lore init --path <new-path>` to switch, `lore use <existing-path>` to point lore at an existing repo, or remove the directory first.*` (Exit 4, conflict.)
 
 After init, if no remote is set, end output with:
 
@@ -238,7 +238,7 @@ After init, if no remote is set, end output with:
     cd $(lore path --repo) && git remote add origin <url>
 ```
 
-`lore doctor` also flags missing remotes as a warning. lore does not wrap `git remote add` — that's git's job.
+Lore does not inspect or configure remotes. Use plain Git inside central for remote setup and synchronization.
 
 Alias: `lore clone <url>` is equivalent to `lore init --from <url>`.
 
@@ -254,7 +254,7 @@ Behavior:
 
 - Validates that the path exists, is a git repo, and looks like a lore central repo (has `projects/` directory).
 - If valid: updates `central_repo` in `~/.config/lore/config.toml`, prints confirmation showing old → new.
-- If not valid: errors with `*<path> doesn't look like a lore central repo (no projects/ directory found). Use `lore init --path <path>` to initialize a new one.*` (Exit 3 — not found.)
+- If not valid: errors with `*<path> doesn't look like a lore central repo (no projects/ directory found). Use `lore init --path <path>` to initialize a new one.*` (Exit 3, not found.)
 
 Useful for: switching between central repos you've already created, recovering from a deleted config when the repo is still on disk, pointing lore at a central repo you migrated to a different drive.
 
@@ -357,109 +357,38 @@ JSON result:
 
 `commit` is `null` when add adopts existing identical copies. `central_path` is `null` for a directory that add skips for safety. Directory status is `added`, `scaffolded`, `already-tracked`, `adopted`, or `skipped-safety`.
 
-### `lore link`
-
-Create symlinks from project checkouts to their central-repo agent directories. Used after `lore clone` on a new machine, or any time a project's symlink is missing.
-
-```
-lore link                            # link the tracked project at cwd (errors if ambiguous)
-lore link --all                      # scan projects_roots, link everything found
-lore link my-app                     # link a single tracked project (uses local state)
-lore link my-app --path ~/elsewhere  # link with explicit path (also records to state)
-```
-
-`lore link` (no args) resolves the project by looking at cwd: matches against tracked project names by basename, or by checking cwd ancestry against local state's recorded paths. Errors with a clear "use `--name` to disambiguate" message if multiple tracked projects share the basename.
-
-`lore link --all` behavior:
-
-1. For each tracked project in the central repo, check local state for a recorded path. If present and valid, use it.
-2. If no path is recorded, scan each entry in `projects_roots` (up to `projects_root_depth` levels deep) for a directory whose basename matches the project name.
-3. Single match → record to local state and create the symlink.
-4. Multiple matches → interactive prompt to pick.
-5. Zero matches → skip with a hint about `lore link <name> --path <path>`.
-
-Happy-path output:
-
-```
-$ lore link --all
-Scanning configured roots for tracked projects...
-  ~/Canonical/git-repos
-  ~/PersonalProjects/git-repos
-
-✓ my-nextjs-app    found at ~/Canonical/git-repos/my-nextjs-app       → linked
-✓ trading-bot      found at ~/PersonalProjects/git-repos/trading-bot  → linked
-⚠ weird-thing      not found in any root
-                   run: lore link weird-thing --path <path>
-✓ docs-site        already linked
-```
-
-Refuses to clobber a real directory at the symlink location. To resolve, the user must remove the real directory or use `lore add --adopt` (TBD; see [open design questions](#open-design-questions)).
-
-### `lore unlink`
-
-Remove a project's symlink without removing it from the central repo. The agent dir stays safe in the central repo; the project just no longer has it linked.
-
-```
-lore unlink my-app
-lore unlink --all
-```
-
 ### `lore rm`
 
-Stop tracking a project entirely. Removes every symlink, removes from local state, and deletes from the central repo's working tree. Files persist in git history, so the operation is recoverable via `git checkout HEAD~1 -- projects/<name>/` in the central repo.
+Stop tracking a project. Lore removes the central project, commits the deletion, and drops every checkout record. It keeps all project copies by default.
 
 ```
-lore rm my-app             # interactive confirmation required
-lore rm my-app --force     # skip confirmation (for scripting / batch removal)
+lore rm my-app                    # keep project copies
+lore rm my-app --purge            # also delete every recorded project copy
+lore rm my-app --purge --force    # override the purge guard and confirmation
 ```
 
-Confirmation prompt:
+`--purge` preflights every recorded checkout. It permits in-sync, central-ahead, and already-missing copies. It refuses project-ahead, diverged, conflicted, invalid, or unreadable copies unless `--force` is explicit. Default removal does not block on local drift because the local files remain in place. Dirty central content always refuses. The recovery command uses the exact pre-removal commit, so later central commits do not make it stale.
 
-```
-$ lore rm scratch-project
-This will:
-  - Remove projects/scratch-project/ from the central repo working tree
-  - Remove ~/code/scratch-project/.claude (symlink, if present)
-  - Remove scratch-project from local state
-  - Commit the deletion to central (recoverable via git history)
-Continue? [y/N]
-```
-
-If you only want to remove the local symlink while keeping the project tracked, use `lore unlink` instead.
+JSON returns `ok` and `result`. The result contains `project`, `central_repo`, `commit`, `commit_message`, `recovery_command`, `purge`, and a non-null `copies` array. Each copy records its checkout, agent directory, path, sync state, health issues, and final `kept`, `purged`, or `missing` status. A partial result returned with an error sets `ok` to `false`.
 
 ### `lore mv`
 
 Rename a tracked project.
 
 ```
-lore mv <old-name> <new-name>                       # rename in central + retarget existing symlink
+lore mv <old-name> <new-name>                       # rename in central and local state
 lore mv <old-name> <new-name> --path ~/code/bar     # also update on-disk path lore tracks
 ```
 
-`lore mv` never renames the user's on-disk project directory. That's the user's job (`mv ~/code/foo ~/code/bar`); lore only updates its own tracking.
+`lore mv` never moves project files. It renames the central directory, moves the complete local-state entry, commits, and records the rename commit as each checkout's new sync-base. In-sync, project-ahead, base-stale, and wholly missing copies may proceed. Central-ahead, diverged, dirty, or otherwise unhealthy checkouts refuse.
 
-Two modes:
+`--path` updates one checkout record after the user moves that checkout separately. With several checkouts, lore selects the sole missing recorded checkout. Otherwise it selects the checkout that contains cwd. Ambiguity refuses without mutation.
 
-- **Default (rename in central only).** Updates central repo dir name, updates the existing symlink's target to point at the new central path, updates local state's name key. The symlink stays at whatever disk path lore knew about. Use this when you're renaming the project conceptually but haven't moved its directory.
-- **With `--path <new-path>`.** Same as above plus: removes the symlink at the old recorded path (if it still exists), creates a fresh symlink at `<new-path>`, updates the path in local state. Use this when you've renamed the project's directory on disk as well.
-
-No automatic cwd detection — explicit `--path` is required for the disk-rename case. Magic that does the right thing 95% of the time is worse than explicit that does the right thing 100% of the time, especially for an operation as rare as renaming a project.
-
-Happy-path output (with `--path`):
-
-```
-$ mv ~/code/foo ~/code/bar      # user renames on disk first
-$ lore mv foo bar --path ~/code/bar
-✓ Renamed projects/foo → projects/bar in central repo
-✓ Removed old symlink: ~/code/foo/.claude
-✓ Created new symlink: ~/code/bar/.claude → projects/bar/.claude
-✓ Updated local state path: ~/code/foo → ~/code/bar
-✓ Committed: "refactor: rename foo to bar"
-```
+JSON returns `ok` and `result`. The result contains the old and new project names, central path, commit SHA and message, `central_only`, and a non-null checkout array. Each checkout records its old path, current path, and new sync-base. A partial result returned with an error sets `ok` to `false`.
 
 ### `lore ls`
 
-List tracked projects.
+List tracked projects and their checkout sync state.
 
 ```
 lore ls
@@ -469,12 +398,15 @@ lore ls --json
 Sample output:
 
 ```
-NAME              DIR       LINKED  CENTRAL PATH
-my-nextjs-app     .claude   ✓       projects/my-nextjs-app/.claude
-trading-bot       .claude   ✓       projects/trading-bot/.claude
-docs-site         .agents   ✓       projects/docs-site/.agents
-scratch-project   .claude   ✗       projects/scratch-project/.claude (no checkout)
+PROJECT         CHECKOUT                     AGENT DIRS       SYNC STATE       HEALTH
+my-nextjs-app  ~/code/my-nextjs-app         .claude, .cursor in-sync          healthy
+my-nextjs-app  ~/worktrees/my-nextjs-app    .claude, .cursor project-ahead    healthy
+docs-site      not placed                   .agents          not-placed       healthy
 ```
+
+Lore prints one row per checkout. A central project with no checkout has one `not-placed` row. `SYNC STATE` and `HEALTH` remain separate so a checkout can report both its content direction and its health issues.
+
+JSON returns `ok` and `result`. The result contains `central_repo`, `central_head`, and a non-null `rows` array. Each row contains `project`, `checkout`, `agent_dirs`, `sync_state`, and `issues`.
 
 ### `lore status`
 
@@ -601,19 +533,16 @@ cd "$(lore path my-app)"
 
 ### `lore doctor`
 
-Diagnose common issues across the entire setup. Categories of checks:
-
-1. **Central repo health** — exists, is a git repo, has remote, working tree state, ahead/behind remote.
-2. **Global gitignore** — all configured `agent_dirs` are ignored.
-3. **Per-project copy health:** copy exists, is a real directory, has a reachable sync-base, and has no unresolved divergence.
-4. **Orphan detection** — projects in central with no on-disk checkout for a long time (informational, not an error).
+Check local setup, central integrity, copy integrity, sync-base reachability, unresolved conflicts, and divergence. Project-ahead and central-ahead are healthy actionable states. Doctor does not inspect Git remote state.
 
 ```
 lore doctor              # diagnose
 lore doctor --fix        # auto-fix safe issues
 ```
 
-`--fix` only auto-fixes unambiguous, reversible issues (re-materialise a missing project copy from central, append a missing gitignore entry). It does **not** auto-resolve divergence.
+`--fix` restores only missing agent directories from committed central content. The destination must still be covered by an effective Git ignore rule. It never replaces an existing copy or resolves divergence. After repair, it advances a checkout's sync-base only when the complete checkout equals central.
+
+JSON returns `ok` and `result`. The result contains `healthy`, a non-null `fixed` path array, and the complete status structure. Doctor exits 7 after emitting the result when an unhealthy condition remains.
 
 ### `lore pull`
 
@@ -688,7 +617,7 @@ These are normative for the entire CLI:
 2. **Errors are actionable.** Never bare `Error: not found`. Always `"Project 'foo' is tracked but not on disk. Either clone it to ~/code/foo or run 'lore rm foo' to stop tracking."`
 3. **`--json` everywhere data flows out.** The JSON schema is part of the public API and must be stable.
 4. **Idempotency is non-negotiable.** Every command should be safe to re-run.
-5. **No surprises with state.** Every output line should make it obvious which of the two state stores (filesystem symlinks, central git repo) was modified.
+5. **No surprises with state.** Every output line should identify whether it changed a project copy, central, or local state.
 6. **Quiet when invoked by automation.** `--auto` / `--quiet` flags should produce no output on no-op success.
 
 ---
@@ -717,7 +646,7 @@ These properties also happen to make the CLI better for humans.
 
 Rationale:
 
-- Single static binary — trivial distribution via Homebrew, direct download, or `go install`.
+- Single static binary: trivial distribution via Homebrew, direct download, or `go install`.
 - Sub-10ms startup; matters for tools run frequently in shells.
 - Best-in-class CLI ecosystem: `cobra` (subcommands, help, completions), `viper` (config), `bubbletea` / `lipgloss` / `huh` (interactive prompts, pretty output).
 - Trivial cross-compilation to all targets.
@@ -744,7 +673,7 @@ internal/
   config/                    # config file load/save
   state/                     # local state load/save
   central/                   # central repo operations
-  link/                      # symlink operations
+  reconcile/                 # copy, classification, and merge operations
   detect/                    # agent dir auto-detection, gitignore checks
   hooks/                     # harness integration
     claudecode/              # Claude Code provider
@@ -768,29 +697,29 @@ Captured here so they aren't lost. Order is rough priority guidance, not commitm
 
 ### Medium-term (v0.3+)
 
-- **`lore link --all --clone-missing`.** When central has tracked projects with no on-disk checkout in any configured root, optionally clone them from a recorded git remote URL. Hugely improves the new-machine recovery story (currently fully manual for the cloning step). Requires per-project metadata in central (see next item).
-- **Per-project metadata file in central (`projects/<name>/.lore.toml`).** Introduced when the first feature needs it — likely `--clone-missing` (records project's git remote) and/or "last seen at path X on host Y" hints to make `lore link --all` smarter when same-basename collisions or missing checkouts happen. Intentionally not in v1 because no v1 feature requires it; YAGNI until then.
+- **`lore pull --all --clone-missing`.** When central has tracked projects with no on-disk checkout in any configured root, optionally clone them from a recorded Git remote URL. This requires per-project metadata in central.
+- **Per-project metadata file in central (`projects/<name>/.lore.toml`).** Introduce it when the first feature needs it, likely `--clone-missing` or path hints that improve `lore pull --all` discovery.
 - **Richer sync commit messages.** Instead of a static `chore: sync ({projects})` template, optionally prompt the user (or the agent, via transcript inspection) for a one-line description of what the session changed. Would make the central repo's `git log` actually useful for archaeology without giving up automatic capture. Likely needs harness cooperation to read the transcript or surface a prompt at session-end. See also: `lore squash` as a complementary approach for cleaning up history after the fact.
-- **`lore squash --since <ref>`** — rewrite a range of auto-sync commits into one meaningful commit, for users who want clean history without giving up auto-capture.
-- **`lore search <query>`** — full-text search across all tracked project lore. Needs an index (sqlite + fts5, or ripgrep-as-library).
-- **Common-locations hints in the central repo** — optional `projects/<name>/.lore.toml` recording common checkout paths to make first-time `lore link --all` smarter on a fresh machine. Skipped in v1 because `projects_roots` scanning should be sufficient; revisit if real friction emerges.
+- **`lore squash --since <ref>`**: rewrite a range of auto-sync commits into one meaningful commit, for users who want clean history without giving up auto-capture.
+- **`lore search <query>`**: full-text search across all tracked project lore. Needs an index (sqlite + fts5, or ripgrep-as-library).
+- **Common-locations hints in central.** Optional metadata can record common checkout paths to improve first-time `lore pull --all` discovery.
 - **`lore log <project>`**: thin scoped wrapper over `git log` for a project's directory in central. Possibly skip entirely if `cd $(lore path foo) && git log .` proves to be enough.
 
 ### Long-term / speculative
 
-- **`lore export` / `lore import`** — bundle/unbundle for sharing project lore with collaborators. Likely unnecessary if `tar` and direct repo sharing suffice; revisit if a real sharing use case emerges that needs metadata bundling (compat version, sanitization).
-- **TUI mode (`lore ui`)** — interactive project browser, status dashboard, content preview.
-- **Encrypted secrets in central repo** — integration with `age` or `sops` for users who want API keys etc. in their lore. May point to chezmoi-style tools instead.
-- **Web-accessible lore viewer** — static-site generator that turns the central repo into a browsable site.
-- **Multiple central repos / profiles** — e.g., work lore separate from personal lore. Defer until someone asks; likely solvable with multiple installations or a `--profile` flag.
-- **MCP server wrapper** — exposes `lore`'s read-only operations (status, search, list) as MCP tools for agents that prefer that protocol. Strictly additive on top of the CLI.
+- **`lore export` / `lore import`**: bundle/unbundle for sharing project lore with collaborators. Likely unnecessary if `tar` and direct repo sharing suffice; revisit if a real sharing use case emerges that needs metadata bundling (compat version, sanitization).
+- **TUI mode (`lore ui`)**: interactive project browser, status dashboard, content preview.
+- **Encrypted secrets in central repo**: integration with `age` or `sops` for users who want API keys etc. in their lore. May point to chezmoi-style tools instead.
+- **Web-accessible lore viewer**: static-site generator that turns the central repo into a browsable site.
+- **Multiple central repos / profiles**: e.g., work lore separate from personal lore. Defer until someone asks; likely solvable with multiple installations or a `--profile` flag.
+- **MCP server wrapper**: exposes `lore`'s read-only operations (status, search, list) as MCP tools for agents that prefer that protocol. Strictly additive on top of the CLI.
 
 ### Explicitly out of scope
 
 - Acting as a full git frontend.
 - Cloud sync separate from git.
 - Anything that requires a server.
-- Opinions about the contents of agent directories (`CLAUDE.md` format, etc.). `lore` moves and symlinks; what's inside is the user's concern.
+- Opinions about the contents of agent directories (`CLAUDE.md` format, etc.). Lore copies agent directories as a unit; their contents are the user's concern.
 - Mixing personal and team-shared content inside the same agent directory (e.g. a project where `.claude/CLAUDE.md` is committed by the team but the user also wants personal prompts under `.claude/`). lore moves agent dirs as a unit; if you want a split, organize it yourself (e.g. `.claude/` stays with the team, `.claude-personal/` is lore-managed).
 - Native Windows support. See [ADR 0001](docs/adr/0001-linux-and-macos-only.md).
 
@@ -798,15 +727,15 @@ Captured here so they aren't lost. Order is rough priority guidance, not commitm
 
 ## Open design questions
 
-The originally-deferred open questions have all been resolved as part of the design — see resolved sections below. The remaining open questions are smaller and worth revisiting once there's real usage data.
+The originally-deferred open questions have all been resolved as part of the design; see the resolved sections below. The remaining open questions are smaller and worth revisiting once there's real usage data.
 
 ### Resolved
 
-1. **~~`lore add --adopt`~~** — omitted from v1. `lore add` refuses if a real (non-symlink) agent directory contains anything lore can't safely move. User resolves manually. Revisit only if real users hit this often enough to justify merge-resolution complexity.
-2. **~~Path-hint metadata in the central repo (`.lore.toml` per project)~~** — deferred until the first feature needs it (likely `--clone-missing` in v0.2). YAGNI for v1.
-3. **~~Nested `.git` inside an agent directory~~** — `lore add` refuses with clear recovery instructions.
-4. **~~Agent dir is itself a symlink at onboarding time~~** — `lore add` refuses; user replaces with a real directory before retrying.
-5. **~~Multiple agent dirs per project~~** — supported as a first-class concept. See [Project definition](CONTEXT.md) and the `lore add` agent-dir detection step. Project identity is `(name, set-of-agent-dirs)`; commands operate on the whole project by default and accept `--dir` to scope.
+1. **~~`lore add --adopt`~~**: omitted from v1. `lore add` refuses if a real (non-symlink) agent directory contains anything lore can't safely move. User resolves manually. Revisit only if real users hit this often enough to justify merge-resolution complexity.
+2. **~~Path-hint metadata in the central repo (`.lore.toml` per project)~~**: deferred until the first feature needs it (likely `--clone-missing` in v0.2). YAGNI for v1.
+3. **~~Nested `.git` inside an agent directory~~**: `lore add` refuses with clear recovery instructions.
+4. **~~Agent dir is itself a symlink at onboarding time~~**: `lore add` refuses; user replaces with a real directory before retrying.
+5. **~~Multiple agent dirs per project~~**: supported as a first-class concept. See [Project definition](CONTEXT.md) and the `lore add` agent-dir detection step. Project identity is `(name, set-of-agent-dirs)`; commands operate on the whole project by default and accept `--dir` to scope.
 6. **~~`lore push --project-from-cwd` when cwd isn't inside any tracked project~~**: error loudly (non-zero exit, stderr) in both `--auto` and interactive modes. See `lore push` behavior.
 
 ### Still open
@@ -819,8 +748,10 @@ The originally-deferred open questions have all been resolved as part of the des
 
 - **Central repo.** The single private git repository (`~/agent-context` by default) holding all tracked project lore.
 - **Tracked project.** A project that has been onboarded with `lore add` and has a subdirectory under `projects/` in the central repo.
-- **Agent directory.** The dot-prefixed directory inside a project that holds agentic AI context — `.claude/`, `.agents/`, `.cursor/`, `.aider/`, etc.
-- **Symlink.** The link from a project's expected agent directory location to the actual content in the central repo.
-- **Local state.** Per-machine path mapping (`~/.local/state/lore/state.toml`) recording where each tracked project lives on this machine.
-- **Harness.** An agentic AI tool that runs sessions in projects — Claude Code, Cursor, Aider, etc. `lore hooks` integrates with harnesses via a provider interface.
+- **Agent directory.** The dot-prefixed directory inside a project that holds agentic AI context: `.claude/`, `.agents/`, `.cursor/`, `.aider/`, etc.
+- **Project copy.** The real agent directory inside one checkout.
+- **Central copy.** The corresponding agent directory inside central.
+- **Sync-base.** The central commit a checkout last reconciled against.
+- **Local state.** Per-machine checkout paths and sync-bases stored in `~/.local/state/lore/state.toml`.
+- **Harness.** An agentic AI tool that runs sessions in projects: Claude Code, Cursor, Aider, etc. `lore hooks` integrates with harnesses via a provider interface.
 - **Lore.** The accumulated, often-unwritten knowledge about a codebase: its quirks, conventions, history, and the prompts/rules/examples a user has built up for an agent working in it.

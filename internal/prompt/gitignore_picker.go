@@ -22,7 +22,7 @@ const (
 	// XDG default). Machine-wide, applies to every repo.
 	TargetGlobalExcludes
 	// TargetRepoExclude appends to .git/info/exclude. Repo-local and
-	// does not survive clones; lore link re-runs the picker after fresh
+	// does not survive clones; lore pull re-runs the picker after fresh
 	// clones (slice 10).
 	TargetRepoExclude
 )
