@@ -297,6 +297,7 @@ func pullAll(cfg config.Config, c *central.Central, st *state.State, head string
 		if artifactErr := detectOrphanProjectReplacementPaths(paths); artifactErr != nil {
 			projectResult.Status = PullProjectRefused
 			projectResult.Err = artifactErr
+			worst = promoteWorst(worst, artifactErr)
 			for _, target := range projectTargets {
 				projectResult.Checkouts = append(projectResult.Checkouts, refusedPullCheckout(target.path, artifactErr))
 			}

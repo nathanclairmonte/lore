@@ -299,6 +299,13 @@ func TestLorePullAllLeavesAmbiguousUnrecordedMatchesUntouched(t *testing.T) {
 	require.True(t, os.IsNotExist(secondErr))
 }
 
+func TestLorePullAllFailsWhenReplacementArtifactBlocksCheckout(t *testing.T) {
+	_, projectRoot, _ := trackedCopySandbox(t)
+	require.NoError(t, os.Mkdir(filepath.Join(projectRoot, reconcile.StagePathPrefix+"orphan"), 0o755))
+
+	require.Equal(t, 7, run([]string{"pull", "--all"}))
+}
+
 func TestLorePullAllContinuesPastDivergedCheckout(t *testing.T) {
 	home := sandbox(t)
 	t.Setenv("GIT_AUTHOR_NAME", "Test Author")
