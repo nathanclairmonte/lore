@@ -230,10 +230,7 @@ func inspectProject(trees *treeCache, head, name string, entry state.ProjectEntr
 	sort.Strings(dirs)
 	result := ProjectStatus{Name: name, Checkouts: make([]CheckoutStatus, 0, len(checkouts)), Issues: []reconcile.Issue{}}
 	if dirty {
-		result.Issues = append(result.Issues, reconcile.Issue{
-			Kind: reconcile.IssueCentralDirty, Path: filepath.Join(c.Path, "projects", name),
-			Message: "central copy has uncommitted or ignored content",
-		})
+		result.Issues = append(result.Issues, centralDirtyIssue(c, name))
 	}
 	for _, checkout := range checkouts {
 		baseExists, err := trees.commitExists(checkout.SyncBase)
@@ -342,6 +339,48 @@ func mergeIssues(groups ...[]reconcile.Issue) []reconcile.Issue {
 	}
 	reconcile.SortIssues(merged)
 	return merged
+}
+
+// onlyCopyMissing reports whether the sole issue is an absent copy, the one
+// benign state that mv, rm, and doctor are allowed to act through.
+func onlyCopyMissing(issues []reconcile.Issue) bool {
+	return len(issues) == 1 && issues[0].Kind == reconcile.IssueCopyMissing
+}
+
+// centralOnlyStatus reports the agent dirs and health issues of a project that
+// exists in central but is not placed on this machine.
+func centralOnlyStatus(c *central.Central, name string) ([]string, []reconcile.Issue, error) {
+	dirs, err := c.ProjectAgentDirs(name)
+	if err != nil {
+		if lerr.CodeOf(err) == lerr.CodeNotFound {
+			return []string{}, []reconcile.Issue{{
+				Kind: reconcile.IssueCentralMissing, Path: c.ProjectPath(name, ""),
+				Message: "central project has no agent directories",
+			}}, nil
+		}
+		return nil, nil, err
+	}
+	if len(dirs) == 0 {
+		return []string{}, []reconcile.Issue{}, nil
+	}
+	dirty, err := c.ScopedDirty(name, dirs)
+	if err != nil {
+		return nil, nil, err
+	}
+	issues := []reconcile.Issue{}
+	if dirty {
+		issues = append(issues, centralDirtyIssue(c, name))
+	}
+	return dirs, issues, nil
+}
+
+// centralDirtyIssue builds the single canonical issue for a central project
+// carrying uncommitted or ignored content.
+func centralDirtyIssue(c *central.Central, name string) reconcile.Issue {
+	return reconcile.Issue{
+		Kind: reconcile.IssueCentralDirty, Path: c.ProjectPath(name, ""),
+		Message: "central copy has uncommitted or ignored content",
+	}
 }
 
 func hasRootCopyIssue(issues []reconcile.Issue) bool {
