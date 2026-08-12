@@ -150,7 +150,10 @@ func TestLorePullKeepsBothBinaryConflicts(t *testing.T) {
 	require.Equal(t, []byte{0, 2}, centralData)
 	require.Equal(t, 0, run([]string{"pull", "my-app"}))
 	require.Equal(t, 0, run([]string{"pull", "my-app", "--project"}))
+	require.NoError(t, os.WriteFile(projectFile+".sync-conflict", []byte{0, 3}, 0o644))
 	require.Equal(t, 7, run([]string{"status", "my-app"}))
+	require.Equal(t, 7, run([]string{"push", "--project", "my-app"}))
+	require.NoError(t, os.Remove(projectFile))
 	require.Equal(t, 7, run([]string{"push", "--project", "my-app"}))
 }
 

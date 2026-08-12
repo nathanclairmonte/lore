@@ -311,20 +311,17 @@ func isTextData(data []byte) bool {
 
 func conflictSiblingIssues(project, central, base Snapshot) []Issue {
 	issues := []Issue{}
-	for siblingPath, sibling := range project {
+	for siblingPath := range project {
 		if !strings.HasSuffix(siblingPath, ConflictSiblingSuffix) {
 			continue
 		}
 		path := strings.TrimSuffix(siblingPath, ConflictSiblingSuffix)
-		original, originalExists := project[path]
-		if !originalExists || entriesEqual(original, true, sibling, true) {
-			continue
-		}
-		centralEntry, centralExists := central[path]
-		baseEntry, baseExists := base[path]
-		matchesCentral := entriesEqual(sibling, true, centralEntry, centralExists)
-		matchesBase := entriesEqual(sibling, true, baseEntry, baseExists)
-		if matchesCentral || matchesBase {
+		_, projectExists := project[path]
+		_, centralExists := central[path]
+		_, baseExists := base[path]
+		// a conflict sibling remains unresolved until it is removed, even if
+		// either conflict value is edited or deleted during resolution.
+		if projectExists || centralExists || baseExists {
 			issues = append(issues, Issue{Kind: IssueConflictSibling, Path: siblingPath, Message: "path is an unresolved keep-both conflict sibling"})
 		}
 	}

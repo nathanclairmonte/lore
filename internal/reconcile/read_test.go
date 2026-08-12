@@ -107,16 +107,28 @@ func TestInspectTreeDoesNotFlagConflictSuffixWithoutMergeContext(t *testing.T) {
 
 func TestClassifyFlagsKeepBothConflictSibling(t *testing.T) {
 	central := Entry{Kind: KindFile, Data: []byte{0, 2}}
-	project := Snapshot{
-		"asset.bin":               {Kind: KindFile, Data: []byte{0, 1}},
-		"asset.bin.sync-conflict": central,
+	tests := map[string]Snapshot{
+		"unchanged": {
+			"asset.bin":               {Kind: KindFile, Data: []byte{0, 1}},
+			"asset.bin.sync-conflict": central,
+		},
+		"edited sibling": {
+			"asset.bin":               {Kind: KindFile, Data: []byte{0, 1}},
+			"asset.bin.sync-conflict": {Kind: KindFile, Data: []byte{0, 3}},
+		},
+		"deleted original": {
+			"asset.bin.sync-conflict": {Kind: KindFile, Data: []byte{0, 3}},
+		},
 	}
-
-	result := Classify(project, Snapshot{"asset.bin": central}, Snapshot{"asset.bin": central}, nil)
-	require.Equal(t, []Issue{{
-		Kind: IssueConflictSibling, Path: "asset.bin.sync-conflict",
-		Message: "path is an unresolved keep-both conflict sibling",
-	}}, result.Issues)
+	for name, project := range tests {
+		t.Run(name, func(t *testing.T) {
+			result := Classify(project, Snapshot{"asset.bin": central}, Snapshot{"asset.bin": central}, nil)
+			require.Equal(t, []Issue{{
+				Kind: IssueConflictSibling, Path: "asset.bin.sync-conflict",
+				Message: "path is an unresolved keep-both conflict sibling",
+			}}, result.Issues)
+		})
+	}
 }
 
 func TestInspectTreeReportsUnreadablePathAndContinues(t *testing.T) {
