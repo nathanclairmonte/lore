@@ -1,11 +1,41 @@
 package project
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
+	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/state"
 )
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func promoteWorst(worst, err error) error {
+	if worst == nil {
+		return err
+	}
+	if lerr.CodeOf(err) == lerr.CodeRefusedSafety && lerr.CodeOf(worst) != lerr.CodeRefusedSafety {
+		return err
+	}
+	return worst
+}
+
+func pathUnderAnyRoot(dir string, roots []string) bool {
+	for _, root := range roots {
+		canonicalRoot := root
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			canonicalRoot = resolved
+		}
+		if isSelfOrAncestor(canonicalRoot, dir) {
+			return true
+		}
+	}
+	return false
+}
 
 // longestRecordedAncestor returns the tracked project whose recorded path
 // is dir itself or the nearest ancestor of dir. The longest match wins so a
