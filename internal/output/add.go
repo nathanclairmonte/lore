@@ -70,8 +70,7 @@ func (r AddResult) allAlreadyTracked() bool {
 	return true
 }
 
-// PrintAddResult renders the per-dir summary defined in SPEC.md's
-// `lore add` section. Three variants:
+// PrintAddResult renders the per-dir add summary in three variants:
 //
 //   - Every dir already tracked: terse "Project X is already tracked"
 //     line; idempotency is meant to be quiet.

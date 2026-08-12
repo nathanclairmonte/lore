@@ -4,8 +4,7 @@ A CLI for keeping per-project agentic AI context version-controlled in a
 single private central repository. Projects keep real local copies. Lore
 reconciles those copies with central without exposing central's Git state.
 
-Status: early development. See [docs/SPEC.md](docs/SPEC.md) for the
-intended design.
+Status: early development.
 
 ## Supported platforms
 
