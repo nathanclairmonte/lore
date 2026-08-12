@@ -10,7 +10,6 @@ import (
 	"github.com/nathanclairmonte/lore/internal/config"
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"github.com/nathanclairmonte/lore/internal/git"
-	"github.com/nathanclairmonte/lore/internal/link"
 	"github.com/nathanclairmonte/lore/internal/prompt"
 	"github.com/nathanclairmonte/lore/internal/reconcile"
 	"github.com/nathanclairmonte/lore/internal/state"
@@ -163,6 +162,22 @@ func TestAddHappyPath(t *testing.T) {
 	require.Equal(t, "feat: add my-app", msg)
 }
 
+func TestAddRefusesCheckoutOwnedByAnotherProjectBeforeMutation(t *testing.T) {
+	centralPath, projectRoot := addSandbox(t)
+	_, err := Add(AddOptions{ProjectPath: projectRoot})
+	require.NoError(t, err)
+	head, err := git.Run(centralPath, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	_, err = Add(AddOptions{ProjectPath: projectRoot, Name: "other"})
+	require.Error(t, err)
+	require.Equal(t, lerr.CodeConflict, lerr.CodeOf(err))
+	require.NoDirExists(t, filepath.Join(centralPath, "projects", "other"))
+	after, err := git.Run(centralPath, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	require.Equal(t, head, after)
+}
+
 func TestAddRejectsDirOutsideProjectRoot(t *testing.T) {
 	centralPath, projectRoot := addSandbox(t)
 	sibling := filepath.Join(filepath.Dir(projectRoot), "sibling")
@@ -189,8 +204,9 @@ func TestAddRefusesWhenNotGitignoredAndNoTTY(t *testing.T) {
 
 	// nothing on disk has changed: source dir still there, no symlink.
 	require.DirExists(t, filepath.Join(projectRoot, ".claude"))
-	isLink, _ := link.IsSymlink(filepath.Join(projectRoot, ".claude"))
-	require.False(t, isLink)
+	info, statErr := os.Lstat(filepath.Join(projectRoot, ".claude"))
+	require.NoError(t, statErr)
+	require.Zero(t, info.Mode()&os.ModeSymlink)
 
 	// no state recorded.
 	st, _, _ := state.Load()
@@ -517,7 +533,11 @@ func snapshotDir(t *testing.T, root string) []string {
 		if relErr != nil {
 			return relErr
 		}
-		entries = append(entries, rel)
+		// the persistent flock path is coordination infrastructure, not a
+		// repository mutation caused by the refused operation.
+		if rel != filepath.Join(".git", "lore-mutation.lock") {
+			entries = append(entries, rel)
+		}
 		return nil
 	})
 	require.NoError(t, err)
@@ -1240,7 +1260,7 @@ func TestAddCreateSkipsExistingDir(t *testing.T) {
 func TestAddCreateNonTTYWithoutDirIsInconsistency(t *testing.T) {
 	_, projectRoot := addSandbox(t)
 	require.NoError(t, os.RemoveAll(filepath.Join(projectRoot, ".claude")))
-	// NO stubScaffoldPickers — the real prompt.PickScaffoldDir must run
+	// no stubScaffoldPickers here, so the real prompt.PickScaffoldDir must run
 	// and fail the isTTY gate (go test stdin is not a terminal).
 
 	_, err := Add(AddOptions{ProjectPath: projectRoot, Create: true})

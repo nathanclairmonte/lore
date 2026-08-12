@@ -26,30 +26,20 @@ func Add(opts AddOptions) (AddResult, error) {
 	if err != nil {
 		return AddResult{}, err
 	}
-	cfg, _, err := config.Load()
+	ctx, err := openMutationContext()
 	if err != nil {
 		return AddResult{}, err
 	}
+	defer ctx.close()
+	cfg := ctx.config
+	st := ctx.state
+	c := ctx.central
 	if err := validateAgentDirNames(opts.Dirs, "--dir"); err != nil {
 		return AddResult{}, err
 	}
 	if err := validateAgentDirNames(cfg.AgentDirs, "configured agent_dirs"); err != nil {
 		return AddResult{}, err
 	}
-	st, _, err := state.Load()
-	if err != nil {
-		return AddResult{}, err
-	}
-	c, err := central.Open(cfg.CentralRepo)
-	if err != nil {
-		if lerr.CodeOf(err) == lerr.CodeNotFound {
-			return AddResult{}, lerr.Newf(lerr.CodeSetupMissing,
-				"central repo not found at %s", config.Contract(cfg.CentralRepo)).
-				WithHint("run `lore init` first")
-		}
-		return AddResult{}, err
-	}
-
 	projectName := opts.Name
 	nameSource := "--name"
 	if projectName == "" {
@@ -58,6 +48,10 @@ func Add(opts AddOptions) (AddResult, error) {
 	}
 	if err := ValidateProjectName(projectName, nameSource); err != nil {
 		return AddResult{}, err
+	}
+	if owner, exists := st.CheckoutOwner(projectPath); exists && owner != projectName {
+		return AddResult{}, lerr.Newf(lerr.CodeConflict,
+			"checkout %s is already recorded for project %q", config.Contract(projectPath), owner)
 	}
 
 	trackedEntry, projectTracked := st.ProjectEntryFor(projectName)
@@ -440,11 +434,4 @@ func ensureAddDirsIgnored(projectPath string, dirs []detect.AgentDir) error {
 		output.Success("added %s to %s", pattern, config.Contract(targetPath))
 	}
 	return nil
-}
-
-func primaryCheckoutPath(entry state.ProjectEntry) string {
-	if len(entry.Checkouts) == 0 {
-		return ""
-	}
-	return entry.Checkouts[0].Path
 }
