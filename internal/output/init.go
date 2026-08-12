@@ -47,6 +47,13 @@ func PrintInitResult(r InitResult) {
 	}
 }
 
+// printGitPushHint prints the shared "back this up remotely" next-step.
+// lore never contacts a Git remote, so every command that lands a central
+// commit ends on the same line.
+func printGitPushHint(centralRepo string) {
+	_, _ = fmt.Fprintf(Out, "Next: cd %s && git push\n", shellQuoteForCD(config.Contract(centralRepo), centralRepo))
+}
+
 // shellQuoteForCD picks a form of the central-repo path that is safe to
 // paste after `cd` in any POSIX shell.
 //

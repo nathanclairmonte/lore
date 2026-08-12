@@ -1,7 +1,7 @@
 [ok] Project:   my-app (~/code/my-app)
 
--> Moved  .claude  ->  ~/agent-context/projects/my-app/.claude
--> Linked .claude  <-  ~/agent-context/projects/my-app/.claude
+-> Copied .claude  ->  ~/agent-context/projects/my-app/.claude
 [ok] Committed to central repo: "feat: add my-app"
+[ok] Recorded sync-base: 0123456789abcdef0123456789abcdef01234567
 
 Next: cd ~/agent-context && git push

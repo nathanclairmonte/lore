@@ -1,10 +1,10 @@
 # lore
 
 A CLI for keeping per-project agentic AI context version-controlled in a
-single private central repository, symlinked into each project on disk.
+single private central repository. Projects keep real local copies. Lore
+reconciles those copies with central without exposing central's Git state.
 
-Status: early development. See [docs/SPEC.md](docs/SPEC.md) for the
-intended design.
+Status: early development.
 
 ## Supported platforms
 
@@ -20,7 +20,13 @@ go install github.com/nathanclairmonte/lore/cmd/lore@latest
 
 ```
 lore init                       # set up the central repository
+lore add                        # track the current project's agent directories
+lore push --project-from-cwd    # capture local changes in central
 ```
+
+`lore push` and `lore pull` only reconcile project and central copies. They
+never contact a Git remote. Run plain `git push` or `git pull` inside central
+for remote operations.
 
 See `lore --help` and the docs for more.
 

@@ -5,7 +5,7 @@
 //
 // Distinct from package detect, which inspects one already-known project
 // root for agent dirs. scan searches many roots to answer "where does
-// project X live on this machine?" - the core of `lore link --all`'s
+// project X live on this machine?" - the core of `lore pull --all`'s
 // new-machine recovery sweep.
 //
 // Linux + macOS only per ADR 0001.

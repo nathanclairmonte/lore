@@ -1,0 +1,11 @@
+my-app  ~/code/my-app
+--- central/.claude/CLAUDE.md
++++ project/.claude/CLAUDE.md
+@@ -1 +1 @@
+-central
++project
+--- /dev/null
++++ project/.claude/notes.md
+@@ -0,0 +1 @@
++notes
+  [!] conflict-markers  .claude/CLAUDE.md: file contains unresolved conflict markers

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -137,6 +138,8 @@ func sampleAddResult() AddResult {
 		ProjectPath:   "/home/u/code/my-app",
 		CentralRepo:   "/home/u/agent-context",
 		CommitMessage: "feat: add my-app",
+		CommitSHA:     "0123456789abcdef0123456789abcdef01234567",
+		SyncBase:      "0123456789abcdef0123456789abcdef01234567",
 		Dirs: []AddDirResult{{
 			Name:        ".claude",
 			Status:      StatusAdded,
@@ -153,6 +156,8 @@ func sampleMultiAddResult() AddResult {
 		ProjectPath:   "/home/u/code/my-app",
 		CentralRepo:   "/home/u/agent-context",
 		CommitMessage: "feat: add my-app",
+		CommitSHA:     "0123456789abcdef0123456789abcdef01234567",
+		SyncBase:      "0123456789abcdef0123456789abcdef01234567",
 		Dirs: []AddDirResult{
 			{
 				Name:        ".claude",
@@ -168,6 +173,88 @@ func sampleMultiAddResult() AddResult {
 	}
 }
 
+func samplePushResult() PushResult {
+	return PushResult{
+		CentralRepo:   "/home/u/agent-context",
+		PreviousHead:  "0123456789abcdef0123456789abcdef01234567",
+		CommitSHA:     "89abcdef0123456789abcdef0123456789abcdef",
+		CommitMessage: "chore: sync (my-app)",
+		Projects: []PushProjectResult{{
+			Name: "my-app",
+			Checkouts: []PushCheckoutResult{{
+				Path: "/home/u/code/my-app", Status: "pushed",
+			}},
+		}},
+	}
+}
+
+func TestGolden_PrintPush_Human(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	PrintPush(samplePushResult(), false)
+	assertGolden(t, "push_human", out.String())
+}
+
+func TestGolden_PrintPush_JSON(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintPush(samplePushResult(), false)
+	assertGolden(t, "push_json", out.String())
+}
+
+func TestPrintPushReportsAdoptedCheckout(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	PrintPush(PushResult{Projects: []PushProjectResult{{
+		Name: "my-app",
+		Checkouts: []PushCheckoutResult{{
+			Path: "/home/u/code/my-app", Status: PushAdopted,
+		}},
+	}}}, true)
+	require.Equal(t, "[ok] Advanced sync-base for 1 checkout(s)\n", out.String())
+}
+
+func samplePullResult() PullResult {
+	return PullResult{
+		CentralRepo:  "/home/u/agent-context",
+		CentralHead:  "89abcdef0123456789abcdef0123456789abcdef",
+		ScannedRoots: []string{},
+		Projects: []PullProjectResult{{
+			Name: "my-app", Status: "pulled", Matches: []string{}, Error: "",
+			Checkouts: []PullCheckoutResult{{
+				Path: "/home/u/code/my-app", Status: "updated",
+				SyncBase: "89abcdef0123456789abcdef0123456789abcdef", Error: "",
+				Dirs: []PullDirResult{{
+					Name: ".claude", Path: "/home/u/code/my-app/.claude",
+					Status: "updated", Unignored: false, Conflicts: []PullConflictResult{},
+				}},
+			}},
+		}},
+	}
+}
+
+func TestGolden_PrintPull_Human(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	PrintPull(samplePullResult())
+	assertGolden(t, "pull_human", out.String())
+}
+
+func TestGolden_PrintPull_JSON(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintPull(samplePullResult())
+	assertGolden(t, "pull_json", out.String())
+}
+
+func TestPrintPullReportsUnknownCheckoutStatus(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	PrintPull(PullResult{Projects: []PullProjectResult{{
+		Name: "my-app", Checkouts: []PullCheckoutResult{{
+			Path: "/home/u/code/my-app", Status: "future-status",
+		}},
+	}}})
+
+	require.Contains(t, out.String(), `unknown status "future-status"`)
+}
+
 // samplePartialAddResult covers the slice-5 partial-failure case: one
 // dir landed, one was refused for safety. golden locks the layout: the
 // added block renders normally, the skipped block follows with a "warn"
@@ -178,6 +265,8 @@ func samplePartialAddResult() AddResult {
 		ProjectPath:   "/home/u/code/my-app",
 		CentralRepo:   "/home/u/agent-context",
 		CommitMessage: "feat: add my-app",
+		CommitSHA:     "0123456789abcdef0123456789abcdef01234567",
+		SyncBase:      "0123456789abcdef0123456789abcdef01234567",
 		Dirs: []AddDirResult{
 			{
 				Name:        ".cursor",
@@ -193,6 +282,130 @@ func samplePartialAddResult() AddResult {
 			},
 		},
 	}
+}
+
+func sampleSyncResult() SyncResult {
+	return SyncResult{
+		CentralRepo: "/home/u/agent-context",
+		CentralHead: "89abcdef0123456789abcdef0123456789abcdef",
+		Projects: []SyncProjectResult{{
+			Name: "my-app",
+			Checkouts: []SyncCheckoutResult{{
+				Path: "/home/u/code/my-app", SyncBase: "0123456789abcdef0123456789abcdef01234567",
+				State: "diverged", Dirs: []SyncDirResult{{
+					Name: ".claude", State: "diverged", Files: []SyncFileResult{
+						{
+							Path: "CLAUDE.md", State: "diverged", ProjectChange: "modified", CentralChange: "modified",
+							Project: &SyncEntry{Type: "file", Data: []byte("project\n")},
+							Central: &SyncEntry{Type: "file", Data: []byte("central\n")},
+							Base:    &SyncEntry{Type: "file", Data: []byte("base\n")},
+						},
+						{
+							Path: "notes.md", State: "project-ahead", ProjectChange: "added", CentralChange: "none",
+							Project: &SyncEntry{Type: "file", Data: []byte("notes\n")},
+						},
+					}, Issues: []SyncIssue{{Kind: SyncIssueConflictMarkers, Path: "CLAUDE.md", Message: "file contains unresolved conflict markers"}},
+				}}, Issues: []SyncIssue{},
+			}},
+		}},
+	}
+}
+
+func TestGolden_PrintStatus_Unicode(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	out, _ := withCleanState(t, true)
+	PrintStatus(sampleSyncResult())
+	assertGolden(t, "status_unicode", out.String())
+}
+
+func TestGolden_PrintStatus_ASCII(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	out, _ := withCleanState(t, false)
+	PrintStatus(sampleSyncResult())
+	assertGolden(t, "status_ascii", out.String())
+}
+
+func TestGolden_PrintStatus_JSON(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintStatus(sampleSyncResult())
+	assertGolden(t, "status_json", out.String())
+}
+
+func TestGolden_PrintDiff_Human(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	out, _ := withCleanState(t, false)
+	PrintDiff(sampleSyncResult())
+	assertGolden(t, "diff_human", out.String())
+}
+
+func TestGolden_PrintDiff_JSON(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintDiff(sampleSyncResult())
+	assertGolden(t, "diff_json", out.String())
+}
+
+func TestPrintDiffReportsEmptyAndBinaryFilesWithoutPatches(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	result := SyncResult{Projects: []SyncProjectResult{{
+		Name: "my-app", Checkouts: []SyncCheckoutResult{{
+			Path: "/work/my-app", Dirs: []SyncDirResult{{Name: ".claude", Files: []SyncFileResult{
+				{Path: "empty", State: "project-ahead", Project: &SyncEntry{Type: "file"}},
+				{Path: "binary", State: "diverged", Project: &SyncEntry{Type: "file", Data: []byte{0, 1}}, Central: &SyncEntry{Type: "file", Data: []byte{0, 2}}},
+			}}},
+		}},
+	}}}
+	PrintDiff(result)
+	require.Contains(t, out.String(), "project-ahead  .claude/empty")
+	require.Contains(t, out.String(), "diverged  .claude/binary")
+	require.NotContains(t, out.String(), "--- central/")
+}
+
+func TestPrintDiffProducesApplicableAddedFilePatch(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	result := SyncResult{Projects: []SyncProjectResult{{
+		Name: "my-app", Checkouts: []SyncCheckoutResult{{
+			Path: "/work/my-app", Dirs: []SyncDirResult{{Name: ".claude", Files: []SyncFileResult{{
+				Path: "notes.md", State: SyncProjectAhead,
+				Project: &SyncEntry{Type: SyncEntryFile, Data: []byte("notes\n")},
+			}}}},
+		}},
+	}}}
+	PrintDiff(result)
+	require.Contains(t, out.String(), "@@ -0,0 +1 @@")
+
+	worktree := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(worktree, ".claude"), 0o755))
+	cmd := exec.Command("git", "apply", "--check", "-")
+	cmd.Dir = worktree
+	cmd.Stdin = strings.NewReader(out.String())
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+}
+
+func TestPrintDiffMarksMissingFinalNewline(t *testing.T) {
+	out, _ := withCleanState(t, false)
+	result := SyncResult{Projects: []SyncProjectResult{{
+		Name: "my-app", Checkouts: []SyncCheckoutResult{{
+			Path: "/work/my-app", Dirs: []SyncDirResult{{Name: ".claude", Files: []SyncFileResult{{
+				Path: "notes.md", State: SyncDiverged,
+				Project: &SyncEntry{Type: SyncEntryFile, Data: []byte("project")},
+				Central: &SyncEntry{Type: SyncEntryFile, Data: []byte("central")},
+			}}}},
+		}},
+	}}}
+	PrintDiff(result)
+	require.Equal(t, 2, strings.Count(out.String(), "\\ No newline at end of file"))
+
+	worktree := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(worktree, ".claude"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, ".claude", "notes.md"), []byte("central"), 0o644))
+	cmd := exec.Command("git", "apply", "--check", "-")
+	cmd.Dir = worktree
+	cmd.Stdin = strings.NewReader(out.String())
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
 }
 
 func TestGolden_PrintAddResult_Fresh_Unicode(t *testing.T) {
@@ -221,6 +434,13 @@ func TestGolden_PrintAddResult_PartialFailure(t *testing.T) {
 	out, _ := withCleanState(t, true)
 	PrintAddResult(samplePartialAddResult())
 	assertGolden(t, "add_partial_failure", out.String())
+}
+
+func TestGolden_PrintAddResult_JSON(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintAddResult(sampleAddResult())
+	assertGolden(t, "add_fresh_json", out.String())
 }
 
 func TestGolden_PrintAddResult_AlreadyTracked(t *testing.T) {
@@ -316,12 +536,45 @@ func TestJSONMode_SuppressesHumanPrinters(t *testing.T) {
 	Warn("anything")
 	Hint("anything")
 	Blank()
-	PrintAddResult(sampleAddResult())
 	PrintInitResult(sampleInitResult(false, false))
 	PrintError(lerr.New(lerr.CodeGenericError, "x"))
 
 	require.Empty(t, out.String(), "human printers must be silent in JSON mode")
 	require.Empty(t, errBuf.String(), "PrintError must be silent in JSON mode")
+}
+
+func TestJSONMode_PrintAddResult(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+	PrintAddResult(sampleAddResult())
+	var got addJSONEnvelope
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	require.Equal(t, "my-app", got.Project.Name)
+	require.Equal(t, sampleAddResult().SyncBase, got.SyncBase)
+	require.NotNil(t, got.Commit)
+	require.Equal(t, sampleAddResult().CommitSHA, got.Commit.SHA)
+	require.Len(t, got.Dirs, 1)
+	require.Empty(t, got.Dirs[0].Violations)
+}
+
+func TestJSONMode_MoveAndRmExposePartialFailure(t *testing.T) {
+	out, _ := captureBoth(t)
+	SetModeForTest(t, ModeJSON)
+
+	PrintMoveResult(MoveResult{ProjectName: "renamed", Checkouts: []MoveCheckoutResult{}}, false)
+	var moveEnvelope struct {
+		OK bool `json:"ok"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &moveEnvelope))
+	require.False(t, moveEnvelope.OK)
+
+	out.Reset()
+	PrintRmResult(RmResult{ProjectName: "removed", Copies: []RmCopyResult{}}, false)
+	var rmEnvelope struct {
+		OK bool `json:"ok"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &rmEnvelope))
+	require.False(t, rmEnvelope.OK)
 }
 
 // --- color/no-color toggling -----------------------------------------

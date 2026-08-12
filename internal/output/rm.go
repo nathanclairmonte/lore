@@ -1,107 +1,81 @@
 package output
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/nathanclairmonte/lore/internal/config"
 )
 
-// RmConfirmationView is the data PrintRmConfirmation renders for the
-// pre-confirm prompt. cmd/lore/rm.go constructs it from project.RmPlan,
-// then calls this to render before invoking prompt.Confirm.
+type RmCopyResult struct {
+	Checkout string      `json:"checkout"`
+	Dir      string      `json:"dir"`
+	Path     string      `json:"path"`
+	State    SyncState   `json:"state"`
+	Issues   []SyncIssue `json:"issues"`
+	Status   string      `json:"status"`
+}
+
 type RmConfirmationView struct {
-	ProjectName  string
-	ProjectPath  string // empty when the project isn't tracked locally
-	CentralRepo  string
-	CommitMsg    string
-	RecoveryCmd  string
-	Dirs         []UnlinkDirResult
-	RefusalNote  string // joined per-dir refusal reasons; empty when none
-	NotInCentral bool
+	ProjectName string
+	CentralRepo string
+	CommitMsg   string
+	RecoveryCmd string
+	Purge       bool
+	Copies      []RmCopyResult
+	RefusalNote string
 }
 
-// RmResult is the data lore rm hands to the output layer after the
-// destructive run completes.
 type RmResult struct {
-	ProjectName   string
-	ProjectPath   string
-	CentralRepo   string
-	CommitMessage string
-	Dirs          []UnlinkDirResult
-	RecoveryCmd   string
+	ProjectName   string         `json:"project"`
+	CentralRepo   string         `json:"central_repo"`
+	CommitMessage string         `json:"commit_message"`
+	Commit        string         `json:"commit"`
+	RecoveryCmd   string         `json:"recovery_command"`
+	Purge         bool           `json:"purge"`
+	Copies        []RmCopyResult `json:"copies"`
 }
 
-// PrintRmConfirmation renders the prompt body the user reads before
-// the y/N step. Lists every symlink that will be removed explicitly
-// (no collapse) so the user can spot a typo-target before saying y.
-// When any dir would refuse, renders that dir as a REFUSE line so the
-// user sees every problematic dir before pressing y.
-//
-// Suppressed in JSON mode (JSON runs are non-interactive and shouldn't
-// reach the prompt path anyway).
-func PrintRmConfirmation(v RmConfirmationView) {
+func PrintRmConfirmation(view RmConfirmationView) {
 	if mode == ModeJSON {
 		return
 	}
 	_, _ = fmt.Fprintln(Out, "This will:")
-	_, _ = fmt.Fprintf(Out, "  - Remove projects/%s/ from the central repo working tree (%s)\n",
-		v.ProjectName, config.Contract(v.CentralRepo))
-	for _, d := range v.Dirs {
-		switch d.Status {
-		case UnlinkStatusUnlinked:
-			_, _ = fmt.Fprintf(Out, "  - Remove symlink %s\n",
-				config.Contract(d.LinkPath))
-		case UnlinkStatusAlreadyUnlinked:
-			_, _ = fmt.Fprintf(Out, "  - Note: %s is already absent on disk\n",
-				config.Contract(d.LinkPath))
-		case UnlinkStatusRefused:
-			reason := "drift refusal"
-			if d.Err != nil {
-				reason = d.Err.Error()
+	_, _ = fmt.Fprintf(Out, "  - Remove projects/%s/ from central (%s)\n", view.ProjectName, config.Contract(view.CentralRepo))
+	for _, copy := range view.Copies {
+		if view.Purge {
+			if copy.Status == "missing" {
+				_, _ = fmt.Fprintf(Out, "  - Already missing: %s\n", config.Contract(copy.Path))
+			} else {
+				_, _ = fmt.Fprintf(Out, "  - Purge %s (%s)\n", config.Contract(copy.Path), copy.State)
 			}
-			_, _ = fmt.Fprintf(Out, "  - REFUSE: %s — %s\n",
-				config.Contract(d.LinkPath), reason)
+		} else {
+			_, _ = fmt.Fprintf(Out, "  - Keep %s (%s)\n", config.Contract(copy.Path), copy.State)
 		}
 	}
-	if v.ProjectPath != "" {
-		_, _ = fmt.Fprintf(Out, "  - Remove %s from local state\n", v.ProjectName)
-	}
-	_, _ = fmt.Fprintf(Out, "  - Commit the deletion to central: %q\n", v.CommitMsg)
-	_, _ = fmt.Fprintf(Out, "  - (Recover with: %s)\n", v.RecoveryCmd)
-
-	if v.NotInCentral {
-		Warn("Project %s is not tracked in central; nothing to remove", v.ProjectName)
-		return
-	}
-	if v.RefusalNote != "" {
+	_, _ = fmt.Fprintf(Out, "  - Remove all local checkout records for %s\n", view.ProjectName)
+	_, _ = fmt.Fprintf(Out, "  - Commit the central deletion: %q\n", view.CommitMsg)
+	_, _ = fmt.Fprintf(Out, "  - Recover with: %s\n", view.RecoveryCmd)
+	if view.RefusalNote != "" {
 		Blank()
-		Warn("Will refuse: %s", v.RefusalNote)
+		Warn("Will refuse: %s", view.RefusalNote)
 	}
 }
 
-// PrintRmResult renders the post-rm success summary. Mirrors the shape
-// of PrintAddResult's commit + next-step block but with rm-specific
-// content: what was removed, the commit message, the recovery command
-// pinned at the bottom (same string the prompt showed pre-confirm).
-func PrintRmResult(r RmResult) {
+func PrintRmResult(result RmResult, ok bool) {
 	if mode == ModeJSON {
+		_ = json.NewEncoder(Out).Encode(struct {
+			OK     bool     `json:"ok"`
+			Result RmResult `json:"result"`
+		}{OK: ok, Result: result})
 		return
 	}
-	if r.ProjectPath != "" {
-		Success("Removed project %s (%s)", r.ProjectName, config.Contract(r.ProjectPath))
-	} else {
-		Success("Removed project %s from central", r.ProjectName)
-	}
-	for _, d := range r.Dirs {
-		switch d.Status {
-		case UnlinkStatusUnlinked:
-			_, _ = fmt.Fprintf(Out, "  - removed symlink: %s\n", config.Contract(d.LinkPath))
-		case UnlinkStatusAlreadyUnlinked:
-			_, _ = fmt.Fprintf(Out, "  - note: %s was already absent\n", config.Contract(d.LinkPath))
-		}
+	Success("Removed project %s from central and local state", result.ProjectName)
+	for _, copy := range result.Copies {
+		_, _ = fmt.Fprintf(Out, "  - %s: %s\n", copy.Status, config.Contract(copy.Path))
 	}
 	Blank()
-	Success("Committed to central repo: %q", r.CommitMessage)
+	Success("Committed to central repo: %q", result.CommitMessage)
 	Blank()
-	_, _ = fmt.Fprintf(Out, "Recover with: %s\n", r.RecoveryCmd)
+	_, _ = fmt.Fprintf(Out, "Recover with: %s\n", result.RecoveryCmd)
 }

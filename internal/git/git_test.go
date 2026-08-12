@@ -1,6 +1,8 @@
 package git
 
 import (
+	"errors"
+	"os/exec"
 	"testing"
 
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
@@ -19,4 +21,12 @@ func TestRunMissingGitMapsToSetupMissing(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, lerr.CodeSetupMissing, lerr.CodeOf(err))
 	require.NotEmpty(t, lerr.HintOf(err), "missing-git error should carry an install hint")
+}
+
+func TestRunPreservesExitStatusInError(t *testing.T) {
+	_, err := Run(t.TempDir(), "rev-parse", "missing-ref")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exit status 128")
+	var exitErr *exec.ExitError
+	require.True(t, errors.As(err, &exitErr))
 }

@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Resets the slice 4 (lore add gitignore picker) manual-smoke sandbox so
+# resets the lore add gitignore-picker smoke sandbox so
 # the next `lore-dev add` runs against a fresh, non-tracked demo-project
-# with .codex as the agent dir. See docs/MANUAL-TESTING.md for the full
-# scenario walkthrough this script feeds into.
+# with .codex as the agent dir.
 #
-# Kept dumb on purpose: no flags, no overrides. The fixture name
-# (demo-project) and agent dir (.codex) are hard-coded because the doc's
-# verification steps reference them by name. .codex is also the only
+# kept dumb on purpose: no flags, no overrides. The fixture name
+# (demo-project) and agent dir (.codex) are hard-coded. .codex is the only
 # default agent dir name unlikely to already match a developer's global
 # gitignore; that's what lets the picker actually fire.
 set -euo pipefail

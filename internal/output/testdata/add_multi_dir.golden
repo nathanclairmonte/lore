@@ -1,9 +1,8 @@
 ✓ Project:   my-app (~/code/my-app)
 
-→ Moved  .claude  →  ~/agent-context/projects/my-app/.claude
-→ Linked .claude  ←  ~/agent-context/projects/my-app/.claude
-→ Moved  .cursor  →  ~/agent-context/projects/my-app/.cursor
-→ Linked .cursor  ←  ~/agent-context/projects/my-app/.cursor
+→ Copied .claude  →  ~/agent-context/projects/my-app/.claude
+→ Copied .cursor  →  ~/agent-context/projects/my-app/.cursor
 ✓ Committed to central repo: "feat: add my-app"
+✓ Recorded sync-base: 0123456789abcdef0123456789abcdef01234567
 
 Next: cd ~/agent-context && git push

@@ -34,7 +34,6 @@ type Config struct {
 	ProjectsDepth int          `toml:"projects_root_depth"`
 	AgentDirs     []string     `toml:"agent_dirs"`
 	Commit        CommitConfig `toml:"commit"`
-	Sync          SyncConfig   `toml:"sync"`
 }
 
 // CommitConfig holds commit-related preferences.
@@ -44,11 +43,6 @@ type CommitConfig struct {
 	RmTemplate   string `toml:"rm_template"`
 	MvTemplate   string `toml:"mv_template"`
 	SyncTemplate string `toml:"sync_template"`
-}
-
-// SyncConfig holds sync-related preferences.
-type SyncConfig struct {
-	AutoPush bool `toml:"auto_push"`
 }
 
 // rawDefaults returns the defaults parsed from the embedded template,

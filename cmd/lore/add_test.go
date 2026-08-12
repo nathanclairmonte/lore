@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nathanclairmonte/lore/internal/git"
+	"github.com/nathanclairmonte/lore/internal/output"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,16 +47,13 @@ func TestLoreAdd_HappyPath(t *testing.T) {
 
 	require.Equal(t, 0, run([]string{"add", projectRoot}))
 
-	// symlink in place pointing into central
+	// project copy remains a real directory.
 	linkInfo, err := os.Lstat(filepath.Join(projectRoot, ".claude"))
 	require.NoError(t, err)
-	require.NotZero(t, linkInfo.Mode()&os.ModeSymlink)
-
-	target, err := os.Readlink(filepath.Join(projectRoot, ".claude"))
-	require.NoError(t, err)
-	require.Equal(t,
-		filepath.Join(home, "agent-context", "projects", "my-app", ".claude"),
-		target)
+	require.Zero(t, linkInfo.Mode()&os.ModeSymlink)
+	require.True(t, linkInfo.IsDir())
+	require.FileExists(t, filepath.Join(projectRoot, ".claude", "CLAUDE.md"))
+	require.FileExists(t, filepath.Join(home, "agent-context", "projects", "my-app", ".claude", "CLAUDE.md"))
 
 	// commit landed on central with the templated message
 	msg, err := git.Run(filepath.Join(home, "agent-context"), "log", "-1", "--pretty=%s")
@@ -72,17 +72,33 @@ func TestLoreAdd_NameFlagRecordsOverride(t *testing.T) {
 	require.NoDirExists(t,
 		filepath.Join(home, "agent-context", "projects", "my-app"))
 
-	// symlink points at the override path.
-	target, err := os.Readlink(filepath.Join(projectRoot, ".claude"))
-	require.NoError(t, err)
-	require.Equal(t,
-		filepath.Join(home, "agent-context", "projects", "foo-alt", ".claude"),
-		target)
+	// project copy remains in place.
+	require.FileExists(t, filepath.Join(projectRoot, ".claude", "CLAUDE.md"))
 
 	// commit message uses the override.
 	msg, err := git.Run(filepath.Join(home, "agent-context"), "log", "-1", "--pretty=%s")
 	require.NoError(t, err)
 	require.Equal(t, "feat: add foo-alt", msg)
+}
+
+func TestLoreAdd_JSONIncludesSyncBase(t *testing.T) {
+	_, projectRoot := addCmdSandbox(t)
+	var outputBuffer strings.Builder
+	previous := output.Out
+	output.Out = &outputBuffer
+	t.Cleanup(func() { output.Out = previous })
+
+	require.Equal(t, 0, run([]string{"--json", "add", projectRoot}))
+	var got struct {
+		Commit *struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+		SyncBase string `json:"sync_base"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(outputBuffer.String()), &got))
+	require.NotNil(t, got.Commit)
+	require.Len(t, got.Commit.SHA, 40)
+	require.Equal(t, got.Commit.SHA, got.SyncBase)
 }
 
 func TestLoreAdd_CreateWithoutDirIsInconsistency(t *testing.T) {

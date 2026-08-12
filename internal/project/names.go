@@ -7,8 +7,8 @@ import (
 )
 
 // nameSlug pins the legal shape for a project name. The name becomes a
-// directory inside central, a symlink target name on the user's machine,
-// and a key in state JSON; restricting to a conservative slug avoids
+// directory inside central and a key in local state; restricting it to a
+// conservative slug avoids
 // shell-escaping, JSON-edge-case, and cross-platform path surprises.
 // Leading dot is excluded so central/projects/<name>/ never looks like a
 // hidden directory; leading dash is excluded so the name can't be

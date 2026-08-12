@@ -1,5 +1,4 @@
-// Package output formats lore's human-mode output and (in slice 21's full
-// polish) its JSON output. All command handlers route through this
+// Package output formats lore's human and JSON output. All command handlers route through this
 // package so styling, glyph fallbacks, and mode selection live in one
 // place.
 //
@@ -15,8 +14,7 @@
 //  3. JSON mode (--json): human-mode printers (Success, Warn, Hint,
 //     PrintAddResult, PrintInitResult, PrintError) suppress all human
 //     output. Data-returning commands emit a documented JSON envelope
-//     instead. Slice 21 wires every data command; slice 03 lands the
-//     plumbing and wires `lore path`.
+//     instead.
 //
 // Concurrency: mode, colorOverride, unicodeOverride, Out, and Err are
 // package-level mutable globals. This is intentional for a single-process
@@ -34,6 +32,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+	"github.com/nathanclairmonte/lore/internal/config"
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 	"golang.org/x/term"
 )
@@ -238,6 +237,12 @@ func Blank() {
 	_, _ = fmt.Fprintln(Out)
 }
 
+// PrintDeferredFailure writes a deferred background failure to stderr.
+func PrintDeferredFailure(data []byte) error {
+	_, err := fmt.Fprintf(Err, "Previous automatic push failed:\n%s", data)
+	return err
+}
+
 // PrintError renders a lore error to Err with its hint, if any.
 // Suppressed in JSON mode: the JSON envelope is the only thing the
 // caller should be parsing on a failure (slice 21 polishes the failure
@@ -284,4 +289,18 @@ func SetUnicodeForTest(t *testing.T, enabled bool) {
 	prev := unicodeOverride
 	unicodeOverride = &enabled
 	t.Cleanup(func() { unicodeOverride = prev })
+}
+
+// printScannedRoots announces a configured-roots sweep. Only announce a scan
+// when one actually ran: when every project resolved from its recorded path
+// roots is empty, and claiming we swept the roots would be misleading.
+func printScannedRoots(roots []string) {
+	if len(roots) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(Out, "Scanning configured roots for tracked projects...")
+	for _, root := range roots {
+		_, _ = fmt.Fprintf(Out, "  %s\n", config.Contract(root))
+	}
+	Blank()
 }

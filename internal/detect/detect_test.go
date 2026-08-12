@@ -91,5 +91,5 @@ func TestDetectAgentDirsSkipsSymlink(t *testing.T) {
 	got, err := DetectAgentDirs(root, defaultCandidates)
 	require.NoError(t, err)
 	require.Equal(t, []string{".cursor"}, namesOf(got),
-		"symlinked candidates are skipped (post-add steady state); .cursor still detected")
+		"symlinked candidates are skipped; .cursor still detected")
 }

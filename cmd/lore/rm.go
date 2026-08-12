@@ -11,123 +11,86 @@ import (
 	"golang.org/x/term"
 )
 
-// stdinIsTTY is a var so tests can stub it. rm needs a TTY gate at the
-// cmd layer (not inside prompt.Confirm) so we can emit CodeRefusedSafety
-// — exit 5 — for the non-TTY-without-force case instead of leaking the
-// prompt package's CodeInconsistency.
-var stdinIsTTY = func() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
-}
-
-// confirmFn is the y/N prompt the cmd layer calls. var rather than
-// direct prompt.Confirm so tests can stub the user's answer without
-// driving the prompt package through a fake stdin.
+var stdinIsTTY = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 var confirmFn = prompt.Confirm
 
-// newRmCmd builds the `lore rm` cobra subcommand.
 func newRmCmd() *cobra.Command {
 	var force bool
+	var purge bool
 	cmd := &cobra.Command{
 		Use:   "rm <name>",
-		Short: "Stop tracking a project entirely and remove it from central",
-		Long: `Removes every symlink lore created for the project, deletes
-its directory from the central repo's working tree, commits
-the deletion, and clears it from local state.
+		Short: "Stop tracking a project and remove its central copy",
+		Long: `Remove a project from central, commit the deletion, and drop every
+local checkout record. Project copies stay on disk by default.
 
-Recoverable: the files persist in central's git history. The
-output prints a 'cd <central> && git checkout HEAD~1 --
-projects/<name>/' command pinned to the central repo path so
-you can restore without having to look up the right
-incantation.
-
-By default 'lore rm' prompts for confirmation. Pass --force
-to skip the prompt (useful for scripts / batch removal). In a
-non-TTY context without --force the command refuses with exit
-5 rather than hanging or silently destroying state.
-
-If you only want to break the local symlinks while keeping
-the project tracked, use 'lore unlink' instead.`,
+Use --purge to delete every recorded project copy. Purge refuses when a
+copy may contain unsynced or uninspectable work. Use --force only when you
+intend to override that guard and skip confirmation.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-
-			// non-TTY without --force: refuse with the actionable
-			// safety message BEFORE doing any work.
-			if !force && !stdinIsTTY() {
-				return lerr.New(lerr.CodeRefusedSafety,
-					"interactive confirmation required but stdin is not a terminal").
-					WithHint("re-run with --force to skip confirmation, or run interactively")
+			if !force && (output.GetMode() == output.ModeJSON || !stdinIsTTY()) {
+				return lerr.New(lerr.CodeRefusedSafety, "interactive confirmation is unavailable in this mode").
+					WithHint("re-run with --force to skip confirmation, or run interactively without --json")
 			}
-
-			plan, err := project.PreflightRm(name)
+			plan, err := project.PreflightRm(args[0], purge, force)
 			if err != nil {
 				return err
 			}
-
-			// not-in-state AND not-in-central → not found. surface
-			// before showing any confirmation so the user doesn't see
-			// a destructive-looking prompt for nothing.
-			if plan.NotInCentral {
-				return lerr.Newf(lerr.CodeNotFound,
-					"project %q is not tracked in central", name)
-			}
-
-			// render confirmation + ask y/N when interactive.
+			// Remove closes the plan itself and Close is idempotent, so this
+			// only covers the abort paths.
+			defer plan.Close()
 			if !force {
+				// confirmation must not hold the store-wide mutation lock.
+				// Remove reopens and revalidates the operation after consent.
+				plan.Close()
 				output.PrintRmConfirmation(rmConfirmationView(plan))
 				output.Blank()
-				ok, confirmErr := confirmFn("Continue?", false)
-				if confirmErr != nil {
-					return confirmErr
+				ok, err := confirmFn("Continue?", false)
+				if err != nil {
+					return err
 				}
 				if !ok {
 					output.Hint("Aborted.")
 					return nil
 				}
 			}
-
-			res, removeErr := project.Remove(plan)
-			if removeErr != nil {
-				return removeErr
+			result, err := project.Remove(plan)
+			if result.ProjectName != "" {
+				output.PrintRmResult(rmResultForOutput(result), err == nil)
 			}
-			output.PrintRmResult(rmResultForOutput(res))
-			return nil
+			return err
 		},
 	}
-	cmd.Flags().BoolVar(&force, "force", false,
-		"skip interactive confirmation (required in non-TTY contexts)")
+	cmd.Flags().BoolVar(&purge, "purge", false, "also delete every recorded project copy")
+	cmd.Flags().BoolVar(&force, "force", false, "skip confirmation and override the purge safety guard")
 	return cmd
 }
 
-// rmConfirmationView translates a project.RmPlan into the output
-// layer's view shape. Captures the joined refusal message verbatim if
-// the pre-flight surfaced one; per-dir refusal reasons travel on Dirs.
-func rmConfirmationView(p project.RmPlan) output.RmConfirmationView {
+func rmConfirmationView(plan *project.RmPlan) output.RmConfirmationView {
 	refusal := ""
-	if p.RefusalErr != nil {
-		refusal = p.RefusalErr.Error()
+	if plan.RefusalErr != nil {
+		refusal = plan.RefusalErr.Error()
 	}
 	return output.RmConfirmationView{
-		ProjectName:  p.ProjectName,
-		ProjectPath:  p.ProjectPath,
-		CentralRepo:  p.CentralRepo,
-		CommitMsg:    p.CommitMsg,
-		RecoveryCmd:  p.RecoveryCmd,
-		Dirs:         unlinkDirsForOutput(p.Dirs),
-		RefusalNote:  refusal,
-		NotInCentral: p.NotInCentral,
+		ProjectName: plan.ProjectName, CentralRepo: plan.CentralRepo, CommitMsg: plan.CommitMsg,
+		RecoveryCmd: plan.RecoveryCmd, Purge: plan.Purge, Copies: rmCopiesForOutput(plan.Copies), RefusalNote: refusal,
 	}
 }
 
-// rmResultForOutput translates a project.RmResult into the output
-// layer's shape.
-func rmResultForOutput(r project.RmResult) output.RmResult {
+func rmResultForOutput(result project.RmResult) output.RmResult {
 	return output.RmResult{
-		ProjectName:   r.ProjectName,
-		ProjectPath:   r.ProjectPath,
-		CentralRepo:   r.CentralRepo,
-		CommitMessage: r.CommitMessage,
-		Dirs:          unlinkDirsForOutput(r.Dirs),
-		RecoveryCmd:   r.RecoveryCmd,
+		ProjectName: result.ProjectName, CentralRepo: result.CentralRepo, CommitMessage: result.CommitMessage,
+		Commit: result.Commit, RecoveryCmd: result.RecoveryCmd, Purge: result.Purge, Copies: rmCopiesForOutput(result.Copies),
 	}
+}
+
+func rmCopiesForOutput(copies []project.RmCopyResult) []output.RmCopyResult {
+	out := make([]output.RmCopyResult, 0, len(copies))
+	for _, copy := range copies {
+		out = append(out, output.RmCopyResult{
+			Checkout: copy.Checkout, Dir: copy.Dir, Path: copy.Path, State: output.SyncState(copy.State),
+			Issues: issuesForOutput(copy.Issues), Status: string(copy.Status),
+		})
+	}
+	return out
 }

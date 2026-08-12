@@ -56,8 +56,8 @@ tasks:
     cmds:
       - go test ./...
 
-  # manual smoke testing (see docs/MANUAL-TESTING.md)
+  # manual smoke testing
   smoke:picker-reset:
-    desc: Reset the slice 4 gitignore-picker smoke sandbox (see docs/MANUAL-TESTING.md)
+    desc: Reset the gitignore-picker smoke sandbox
     cmds:
       - ./scripts/smoke-picker-reset.sh

@@ -1,0 +1,5 @@
+-> Pushed my-app  /home/u/code/my-app
+[ok] Committed to central repo: "chore: sync (my-app)"
+[ok] Recorded sync-base: 89abcdef0123456789abcdef0123456789abcdef
+
+Next: cd /home/u/agent-context && git push

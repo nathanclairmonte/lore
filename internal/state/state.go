@@ -1,42 +1,58 @@
-// Package state loads and saves lore's per-machine local state file
-// (~/.local/state/lore/state.toml). State is never committed; it's a
-// per-project record of on-disk path + tracked agent dirs, regeneratable
-// by `lore link`.
+// Package state loads and saves lore's per-machine local state file.
 package state
 
 import (
 	"errors"
-	"maps"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	lerr "github.com/nathanclairmonte/lore/internal/errors"
 )
 
-// CurrentSchemaVersion is the schema_version value written by this lore
-// build. Bumped to 2 in slice 5 to record the set of tracked agent dirs
-// per project. Older versions are rejected at Load time: lore is still
-// pre-1.0 with effectively one user, so the cost of carrying migration
-// code outweighs the convenience.
-const CurrentSchemaVersion = 2
+// CurrentSchemaVersion is the schema_version value written by this build.
+const CurrentSchemaVersion = 3
 
 const stateFileRelPath = "lore/state.toml"
+const syncErrorFileName = "last-sync-error.txt"
 
-// ProjectEntry is the per-project record. AgentDirs is the set of agent
-// directories tracked under projects/<name>/ in the central repo, in the
-// order they were added. Always non-empty for a tracked project:
-// RemoveAgentDir collapses the entry when the last dir leaves.
+// CheckoutEntry records one project copy on this machine.
+type CheckoutEntry struct {
+	Path     string `toml:"path"`
+	SyncBase string `toml:"sync_base"`
+}
+
+// ProjectEntry records shared project identity and per-checkout state.
 type ProjectEntry struct {
-	Path      string   `toml:"path"`
-	AgentDirs []string `toml:"agent_dirs"`
+	AgentDirs []string        `toml:"agent_dirs"`
+	Checkouts []CheckoutEntry `toml:"checkouts"`
 }
 
 // State is the typed representation of state.toml.
 type State struct {
 	SchemaVersion int                     `toml:"schema_version"`
 	Projects      map[string]ProjectEntry `toml:"projects"`
+}
+
+type validationIssueKind uint8
+
+const (
+	missingAgentDirs validationIssueKind = iota
+	missingCheckouts
+	invalidCheckout
+	duplicateCheckout
+)
+
+type validationIssue struct {
+	kind     validationIssueKind
+	project  string
+	other    string
+	checkout CheckoutEntry
+	err      error
 }
 
 // Path returns the on-disk location of the state file. Honors
@@ -52,6 +68,15 @@ func Path() (string, error) {
 	return filepath.Join(home, ".local", "state", stateFileRelPath), nil
 }
 
+// SyncErrorPath returns the deferred automatic-sync error record path.
+func SyncErrorPath() (string, error) {
+	path, err := Path()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), syncErrorFileName), nil
+}
+
 // Defaults returns an empty State at the current schema version.
 func Defaults() State {
 	return State{
@@ -63,7 +88,7 @@ func Defaults() State {
 // Load reads the state file. If absent, returns Defaults() with
 // exists=false (nil err). Files at schema versions other than the
 // current one are rejected with CodeInconsistency; the user is expected
-// to remove the stale file (a future `lore link` will regenerate it).
+// to remove the stale file and rebuild current state with pull.
 func Load() (st State, exists bool, err error) {
 	path, err := Path()
 	if err != nil {
@@ -76,7 +101,7 @@ func Load() (st State, exists bool, err error) {
 		}
 		return State{}, false, lerr.Wrap(lerr.CodeGenericError, err, "cannot read state file")
 	}
-	// decode into a zero-value State (NOT Defaults()) so a file missing
+	// decode into a zero-value State so a file missing
 	// schema_version doesn't silently inherit CurrentSchemaVersion and
 	// slip past the version check below.
 	if _, err := toml.Decode(string(data), &st); err != nil {
@@ -86,21 +111,11 @@ func Load() (st State, exists bool, err error) {
 		return State{}, false, lerr.Newf(lerr.CodeInconsistency,
 			"state file at %s is schema version %d, but this lore expects %d",
 			path, st.SchemaVersion, CurrentSchemaVersion).
-			WithHint("delete the file and re-run `lore add` (or `lore link` once it ships)")
+			WithHint("delete the stale state file, replace any legacy top-level links with real directories, then run `lore pull --all`")
 	}
-	// enforce the ProjectEntry invariant at the trust boundary: every
-	// tracked project has at least one agent dir. AddAgentDir and
-	// RemoveAgentDir maintain this in memory, but a hand-edited state
-	// file could skip the agent_dirs key entirely and slip through
-	// otherwise, leaving Add to fail with a confusing central-side
-	// CodeConflict instead of a clear "your state file is wrong."
-	for name, entry := range st.Projects {
-		if len(entry.AgentDirs) == 0 {
-			return State{}, false, lerr.Newf(lerr.CodeInconsistency,
-				"state file at %s has no agent_dirs for project %q",
-				path, name).
-				WithHint("delete the file and re-run `lore add` (or `lore link` once it ships)")
-		}
+	// enforce invariants at the trust boundary so invalid state fails here.
+	if issue := validateProjects(st.Projects); issue != nil {
+		return State{}, false, issue.loadError(path)
 	}
 	if st.Projects == nil {
 		st.Projects = map[string]ProjectEntry{}
@@ -118,50 +133,61 @@ func (s *State) ProjectEntryFor(name string) (ProjectEntry, bool) {
 	return e, ok
 }
 
-// PathFor returns the absolute path recorded for name. Thin wrapper for
-// callers that only care about the project path, not its agent dirs.
+// PathFor returns the sole checkout path for name.
 func (s *State) PathFor(name string) (string, bool) {
 	e, ok := s.ProjectEntryFor(name)
-	if !ok {
+	if !ok || len(e.Checkouts) != 1 {
 		return "", false
 	}
-	return e.Path, true
+	return e.Checkouts[0].Path, true
+}
+
+// CheckoutForPath returns the checkout recorded at projectPath.
+func (s *State) CheckoutForPath(name, projectPath string) (CheckoutEntry, bool) {
+	entry, ok := s.ProjectEntryFor(name)
+	if !ok {
+		return CheckoutEntry{}, false
+	}
+	for _, checkout := range entry.Checkouts {
+		if checkout.Path == projectPath {
+			return checkout, true
+		}
+	}
+	return CheckoutEntry{}, false
+}
+
+// CheckoutOwner returns the project that owns an exact checkout path.
+func (s *State) CheckoutOwner(projectPath string) (string, bool) {
+	for name, entry := range s.Projects {
+		for _, checkout := range entry.Checkouts {
+			if checkout.Path == projectPath {
+				return name, true
+			}
+		}
+	}
+	return "", false
 }
 
 // Clone returns a copy of s safe to mutate independently. Projects is a map
 // (reference type), so a plain struct copy would alias it; orchestrators
 // that snapshot pre-mutation state for a rollback (lore rm / mv) need this.
-// Per-entry AgentDirs slices are shared, which is safe because callers
-// replace whole entries rather than mutating a slice in place.
 func (s *State) Clone() State {
 	out := State{
 		SchemaVersion: s.SchemaVersion,
 		Projects:      make(map[string]ProjectEntry, len(s.Projects)),
 	}
-	maps.Copy(out.Projects, s.Projects)
+	for name, entry := range s.Projects {
+		entry.AgentDirs = slices.Clone(entry.AgentDirs)
+		entry.Checkouts = slices.Clone(entry.Checkouts)
+		out.Projects[name] = entry
+	}
 	return out
 }
 
-// AddAgentDir records (name, projectPath, dirName) on the in-memory
-// state. Idempotent on a triple already present; rejects the same name
-// at a different projectPath (callers must remove the old entry first).
-//
-// Rejects empty names, empty paths, non-absolute paths, and empty
-// dirNames so a misbehaving caller can't poison state with values that
-// would later fail to round-trip or resolve.
-//
-// Does NOT persist; callers control when to Save so multi-step flows
-// (lore add) can roll back without leaving a half-written state file.
-func (s *State) AddAgentDir(name, projectPath, dirName string) error {
+// AddAgentDir records an agent directory in the project identity.
+func (s *State) AddAgentDir(name, dirName string) error {
 	if name == "" {
 		return lerr.New(lerr.CodeGenericError, "project name cannot be empty")
-	}
-	if projectPath == "" {
-		return lerr.New(lerr.CodeGenericError, "project path cannot be empty")
-	}
-	if !filepath.IsAbs(projectPath) {
-		return lerr.Newf(lerr.CodeGenericError,
-			"project path must be absolute, got %q", projectPath)
 	}
 	if dirName == "" {
 		return lerr.New(lerr.CodeGenericError, "agent dir name cannot be empty")
@@ -172,14 +198,9 @@ func (s *State) AddAgentDir(name, projectPath, dirName string) error {
 	existing, ok := s.Projects[name]
 	if !ok {
 		s.Projects[name] = ProjectEntry{
-			Path:      projectPath,
 			AgentDirs: []string{dirName},
 		}
 		return nil
-	}
-	if existing.Path != projectPath {
-		return lerr.Newf(lerr.CodeConflict,
-			"project %q is already tracked at %s", name, existing.Path)
 	}
 	if slices.Contains(existing.AgentDirs, dirName) {
 		return nil
@@ -187,6 +208,71 @@ func (s *State) AddAgentDir(name, projectPath, dirName string) error {
 	existing.AgentDirs = append(existing.AgentDirs, dirName)
 	s.Projects[name] = existing
 	return nil
+}
+
+// RecordCheckout records or updates one checkout and its sync-base.
+func (s *State) RecordCheckout(name, projectPath, syncBase string) error {
+	if name == "" {
+		return lerr.New(lerr.CodeGenericError, "project name cannot be empty")
+	}
+	checkout := CheckoutEntry{Path: projectPath, SyncBase: syncBase}
+	if err := validateCheckout(checkout); err != nil {
+		return lerr.New(lerr.CodeGenericError, err.Error())
+	}
+	entry, ok := s.Projects[name]
+	if !ok || len(entry.AgentDirs) == 0 {
+		return lerr.Newf(lerr.CodeInconsistency,
+			"project %q has no agent directories recorded", name)
+	}
+	if owner, exists := s.CheckoutOwner(projectPath); exists && owner != name {
+		return lerr.Newf(lerr.CodeConflict,
+			"checkout %s is already recorded for project %q", projectPath, owner)
+	}
+	for i, existing := range entry.Checkouts {
+		if existing.Path == projectPath {
+			entry.Checkouts[i] = checkout
+			s.Projects[name] = entry
+			return nil
+		}
+	}
+	entry.Checkouts = append(entry.Checkouts, checkout)
+	s.Projects[name] = entry
+	return nil
+}
+
+// RemoveCheckout drops one checkout from a project.
+func (s *State) RemoveCheckout(name, projectPath string) {
+	entry, ok := s.Projects[name]
+	if !ok {
+		return
+	}
+	entry.Checkouts = slices.DeleteFunc(entry.Checkouts, func(c CheckoutEntry) bool {
+		return c.Path == projectPath
+	})
+	if len(entry.Checkouts) == 0 {
+		delete(s.Projects, name)
+		return
+	}
+	s.Projects[name] = entry
+}
+
+// RenameProject moves a project entry without changing its checkout data.
+func (s *State) RenameProject(oldName, newName string) error {
+	entry, ok := s.Projects[oldName]
+	if !ok {
+		return lerr.Newf(lerr.CodeNotFound, "project %q is not recorded in local state", oldName)
+	}
+	if _, exists := s.Projects[newName]; exists {
+		return lerr.Newf(lerr.CodeConflict, "project %q is already recorded in local state", newName)
+	}
+	delete(s.Projects, oldName)
+	s.Projects[newName] = entry
+	return nil
+}
+
+// RemoveProject drops every checkout record for a project.
+func (s *State) RemoveProject(name string) {
+	delete(s.Projects, name)
 }
 
 // RemoveAgentDir drops dirName from name's tracked set. If the removal
@@ -221,12 +307,120 @@ func (s *State) RemoveAgentDir(name, dirName string) {
 	s.Projects[name] = entry
 }
 
+func validateCheckout(checkout CheckoutEntry) error {
+	if checkout.Path == "" {
+		return errors.New("checkout path is empty")
+	}
+	if !filepath.IsAbs(checkout.Path) {
+		return fmt.Errorf("checkout path must be absolute, got %q", checkout.Path)
+	}
+	if len(checkout.SyncBase) != 40 || strings.IndexFunc(checkout.SyncBase, func(r rune) bool {
+		return (r < '0' || r > '9') && (r < 'a' || r > 'f')
+	}) != -1 {
+		return fmt.Errorf("sync-base must be a 40-character lowercase Git SHA")
+	}
+	return nil
+}
+
+func validateProjects(projects map[string]ProjectEntry) *validationIssue {
+	seen := map[string]string{}
+	names := make([]string, 0, len(projects))
+	for name := range projects {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		entry := projects[name]
+		if len(entry.AgentDirs) == 0 {
+			return &validationIssue{kind: missingAgentDirs, project: name}
+		}
+		if len(entry.Checkouts) == 0 {
+			return &validationIssue{kind: missingCheckouts, project: name}
+		}
+		for _, checkout := range entry.Checkouts {
+			if err := validateCheckout(checkout); err != nil {
+				return &validationIssue{
+					kind: invalidCheckout, project: name, checkout: checkout, err: err,
+				}
+			}
+			if other, ok := seen[checkout.Path]; ok {
+				return &validationIssue{
+					kind: duplicateCheckout, project: name, other: other, checkout: checkout,
+				}
+			}
+			seen[checkout.Path] = name
+		}
+	}
+	return nil
+}
+
+func (issue *validationIssue) loadError(path string) error {
+	switch issue.kind {
+	case missingAgentDirs:
+		return lerr.Newf(lerr.CodeInconsistency,
+			"state file at %s has no agent_dirs for project %q", path, issue.project).
+			WithHint("delete the file and run `lore pull --all`")
+	case missingCheckouts:
+		return lerr.Newf(lerr.CodeInconsistency,
+			"state file at %s has no checkouts for project %q", path, issue.project).
+			WithHint("delete the file and run `lore pull --all`")
+	case invalidCheckout:
+		return lerr.Newf(lerr.CodeInconsistency,
+			"state file at %s has an invalid checkout for project %q: %s",
+			path, issue.project, issue.err).
+			WithHint("delete the file and run `lore pull --all`")
+	case duplicateCheckout:
+		if issue.other == issue.project {
+			return lerr.Newf(lerr.CodeInconsistency,
+				"state file at %s records checkout %s more than once for project %q",
+				path, issue.checkout.Path, issue.project).
+				WithHint("delete the duplicate checkout and retry")
+		}
+		return lerr.Newf(lerr.CodeInconsistency,
+			"state file at %s records checkout %s for both %q and %q",
+			path, issue.checkout.Path, issue.other, issue.project).
+			WithHint("delete the duplicate checkout and retry")
+	default:
+		panic("unknown state validation issue")
+	}
+}
+
+func (issue *validationIssue) saveError() error {
+	switch issue.kind {
+	case missingAgentDirs, missingCheckouts:
+		return lerr.Newf(lerr.CodeInconsistency,
+			"cannot save incomplete state for project %q", issue.project)
+	case invalidCheckout:
+		return lerr.Newf(lerr.CodeInconsistency,
+			"cannot save invalid checkout for project %q: %s", issue.project, issue.err)
+	case duplicateCheckout:
+		if issue.other == issue.project {
+			return lerr.Newf(lerr.CodeInconsistency,
+				"cannot save duplicate checkout %s for project %q",
+				issue.checkout.Path, issue.project)
+		}
+		return lerr.Newf(lerr.CodeInconsistency,
+			"cannot save checkout %s for both %q and %q",
+			issue.checkout.Path, issue.other, issue.project)
+	default:
+		panic("unknown state validation issue")
+	}
+}
+
 // Save writes the state file atomically, creating its parent directory
 // if needed. Writes to a sibling tempfile then renames into place so a
 // crash or encode failure can never leave a truncated state.toml on
 // disk. lore add's rollback path leans on this: if Save errors out the
 // previous state file is still intact.
 func Save(s State) error {
+	if s.SchemaVersion != CurrentSchemaVersion {
+		return lerr.Newf(lerr.CodeInconsistency,
+			"cannot save state schema version %d with lore schema version %d",
+			s.SchemaVersion, CurrentSchemaVersion)
+	}
+	if issue := validateProjects(s.Projects); issue != nil {
+		return issue.saveError()
+	}
 	path, err := Path()
 	if err != nil {
 		return err

@@ -1,0 +1,1 @@
+{"central_repo":"/home/u/agent-context","previous_head":"0123456789abcdef0123456789abcdef01234567","commit_sha":"89abcdef0123456789abcdef0123456789abcdef","commit_message":"chore: sync (my-app)","projects":[{"name":"my-app","checkouts":[{"path":"/home/u/code/my-app","status":"pushed"}]}]}

@@ -12,7 +12,6 @@ import (
 // Two persistent flags are wired here:
 //
 //   - --json: switches every data-returning command to its JSON envelope.
-//     Slice 03 wires `lore path`; slice 21 extends to ls/status/doctor.
 //     Human-mode printers (Success/Warn/PrintAddResult/...) become no-ops
 //     under --json so script callers see only the documented envelope.
 //   - --no-color: disables ANSI styling. Honored in addition to the
@@ -23,12 +22,13 @@ func newRootCmd() *cobra.Command {
 		jsonFlag    bool
 		noColorFlag bool
 	)
+	var pushCommand *cobra.Command
 	root := &cobra.Command{
 		Use:   "lore",
 		Short: "Version-controlled per-project agentic AI context",
 		Long: "lore keeps every tracked project's agent directories (.claude/, " +
 			".cursor/, .agents/, ...) in a single private central repository " +
-			"and symlinks them back into each project on disk.",
+			"and reconciles them with real copies in each project on disk.",
 		// silence cobra's default error/usage printing; main.go owns
 		// rendering errors through the output module.
 		SilenceErrors: true,
@@ -43,6 +43,7 @@ func newRootCmd() *cobra.Command {
 				output.SetMode(output.ModeHuman)
 			}
 			output.SetNoColor(noColorFlag)
+			surfacePendingPushFailure(cmd, pushCommand)
 		},
 	}
 	root.PersistentFlags().BoolVar(&jsonFlag, "json", false,
@@ -51,10 +52,15 @@ func newRootCmd() *cobra.Command {
 		"Disable ANSI color output (NO_COLOR env var is also honored)")
 	root.AddCommand(newInitCmd())
 	root.AddCommand(newAddCmd())
-	root.AddCommand(newLinkCmd())
+	root.AddCommand(newLsCmd())
+	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newPathCmd())
-	root.AddCommand(newUnlinkCmd())
 	root.AddCommand(newRmCmd())
 	root.AddCommand(newMvCmd())
+	root.AddCommand(newStatusCmd())
+	root.AddCommand(newDiffCmd())
+	root.AddCommand(newPullCmd())
+	pushCommand = newPushCmd()
+	root.AddCommand(pushCommand)
 	return root
 }
