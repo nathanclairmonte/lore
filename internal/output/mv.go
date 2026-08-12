@@ -1,86 +1,45 @@
 package output
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/nathanclairmonte/lore/internal/config"
 )
 
-// MoveDirStatus mirrors project.MoveDirStatus so this package doesn't
-// import project. cmd/lore/mv.go translates the orchestrator's verdicts
-// into this shape.
-type MoveDirStatus string
-
-const (
-	MoveStatusRetargeted  MoveDirStatus = "retargeted"
-	MoveStatusMovedToPath MoveDirStatus = "moved"
-	MoveStatusRecreated   MoveDirStatus = "recreated"
-	MoveStatusSkippedOld  MoveDirStatus = "skipped-old"
-	MoveStatusLeftInPlace MoveDirStatus = "left-in-place"
-)
-
-// MoveDirResult mirrors project.MoveDirResult.
-type MoveDirResult struct {
-	Name    string
-	Status  MoveDirStatus
-	OldLink string
-	NewLink string
-	Note    string
+type MoveCheckoutResult struct {
+	OldPath  string `json:"old_path"`
+	Path     string `json:"path"`
+	SyncBase string `json:"sync_base"`
 }
 
-// MoveResult is the data lore mv hands to the output layer.
 type MoveResult struct {
-	OldName       string
-	ProjectName   string
-	OldPath       string
-	NewPath       string
-	CentralRepo   string
-	CommitMessage string
-	Dirs          []MoveDirResult
-	NotLinkedHere bool
+	OldName       string               `json:"old_name"`
+	ProjectName   string               `json:"project"`
+	CentralRepo   string               `json:"central_repo"`
+	CommitMessage string               `json:"commit_message"`
+	Commit        string               `json:"commit"`
+	CentralOnly   bool                 `json:"central_only"`
+	Checkouts     []MoveCheckoutResult `json:"checkouts"`
 }
 
-// PrintMoveResult renders the post-mv success summary: the rename
-// headline, one line per agent dir describing what happened to its
-// symlink, the lenient "left in place" / "already absent" notes from
-// --path mode, and the central commit line.
-//
-// Suppressed in JSON mode.
-func PrintMoveResult(r MoveResult) {
+func PrintMoveResult(result MoveResult, ok bool) {
 	if mode == ModeJSON {
+		_ = json.NewEncoder(Out).Encode(struct {
+			OK     bool       `json:"ok"`
+			Result MoveResult `json:"result"`
+		}{OK: ok, Result: result})
 		return
 	}
-
 	g := activeGlyphs()
-	arrow := g.arrowRight
-
-	if r.NotLinkedHere {
-		Success("Renamed projects/%s %s projects/%s in central (no symlinks on this machine)",
-			r.OldName, arrow, r.ProjectName)
-		Blank()
-		Success("Committed to central repo: %q", r.CommitMessage)
-		return
-	}
-
-	Success("Renamed %s %s %s (%s)", r.OldName, arrow, r.ProjectName,
-		config.Contract(r.NewPath))
-	for _, d := range r.Dirs {
-		switch d.Status {
-		case MoveStatusRetargeted:
-			_, _ = fmt.Fprintf(Out, "  - retargeted symlink: %s\n", config.Contract(d.NewLink))
-		case MoveStatusMovedToPath:
-			_, _ = fmt.Fprintf(Out, "  - moved symlink: %s %s %s\n",
-				config.Contract(d.OldLink), arrow, config.Contract(d.NewLink))
-		case MoveStatusRecreated:
-			_, _ = fmt.Fprintf(Out, "  - created symlink (was missing): %s\n",
-				config.Contract(d.NewLink))
-		case MoveStatusSkippedOld, MoveStatusLeftInPlace:
-			_, _ = fmt.Fprintf(Out, "  - created symlink: %s\n", config.Contract(d.NewLink))
-			if d.Note != "" {
-				Warn("%s", d.Note)
-			}
+	Success("Renamed projects/%s %s projects/%s in central", result.OldName, g.arrowRight, result.ProjectName)
+	for _, checkout := range result.Checkouts {
+		if checkout.OldPath != checkout.Path {
+			_, _ = fmt.Fprintf(Out, "  - checkout path: %s %s %s\n", config.Contract(checkout.OldPath), g.arrowRight, config.Contract(checkout.Path))
+		} else {
+			_, _ = fmt.Fprintf(Out, "  - checkout retained: %s\n", config.Contract(checkout.Path))
 		}
 	}
 	Blank()
-	Success("Committed to central repo: %q", r.CommitMessage)
+	Success("Committed to central repo: %q", result.CommitMessage)
 }
