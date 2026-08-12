@@ -26,7 +26,7 @@ func TestRecoverProjectReplacementCompletesPublishedTransaction(t *testing.T) {
 	journal, err := projectReplacementPath()
 	require.NoError(t, err)
 	transaction := projectReplacementTransaction{path: journal, record: projectReplacementRecord{
-		Version: projectReplacementVersion, Project: "my-app", Checkout: projectRoot,
+		Version: 1, Project: "my-app", Checkout: projectRoot,
 		SyncBase: newBase, AgentDirs: []string{".claude"},
 		Items: []projectReplacementItem{{
 			Destination: destination, Staged: filepath.Join(projectRoot, ".lore-stage-test"),
@@ -61,7 +61,7 @@ func TestRecoverProjectReplacementRollsBackIncompleteTransaction(t *testing.T) {
 		Version: projectReplacementVersion, Project: "my-app", Checkout: projectRoot,
 		SyncBase: "89abcdef0123456789abcdef0123456789abcdef", AgentDirs: []string{".claude"},
 		Items: []projectReplacementItem{{
-			Destination: destination, Staged: staged, Backup: backup, HadOriginal: true,
+			Destination: destination, Staged: staged, Backup: backup, HadOriginal: true, Copied: true,
 		}},
 	}}
 	require.NoError(t, transaction.save())
@@ -87,7 +87,7 @@ func TestRecoverProjectReplacementRestoresRecordedBackupBeforeHadOriginalSave(t 
 	transaction := projectReplacementTransaction{path: journal, record: projectReplacementRecord{
 		Version: projectReplacementVersion, Project: "my-app", Checkout: projectRoot,
 		SyncBase: "89abcdef0123456789abcdef0123456789abcdef", AgentDirs: []string{".claude"},
-		Items: []projectReplacementItem{{Destination: destination, Staged: staged, Backup: backup}},
+		Items: []projectReplacementItem{{Destination: destination, Staged: staged, Backup: backup, Copied: true}},
 	}}
 	require.NoError(t, transaction.save())
 
@@ -95,6 +95,28 @@ func TestRecoverProjectReplacementRestoresRecordedBackupBeforeHadOriginalSave(t 
 	data, err := os.ReadFile(filepath.Join(destination, "CLAUDE.md"))
 	require.NoError(t, err)
 	require.Equal(t, "context", string(data))
+	require.NoFileExists(t, journal)
+}
+
+func TestRecoverProjectReplacementRemovesPartiallyCopiedStage(t *testing.T) {
+	_, projectRoot := addSandbox(t)
+	st := state.Defaults()
+	destination := filepath.Join(projectRoot, ".claude")
+	staged := filepath.Join(projectRoot, ".lore-stage-test")
+	require.NoError(t, os.Mkdir(staged, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(staged, "partial"), []byte("partial"), 0o644))
+	journal, err := projectReplacementPath()
+	require.NoError(t, err)
+	transaction := projectReplacementTransaction{path: journal, record: projectReplacementRecord{
+		Version: projectReplacementVersion, Project: "my-app", Checkout: projectRoot,
+		SyncBase: "89abcdef0123456789abcdef0123456789abcdef", AgentDirs: []string{".claude"},
+		Items: []projectReplacementItem{{Destination: destination, Staged: staged}},
+	}}
+	require.NoError(t, transaction.save())
+
+	require.NoError(t, recoverProjectReplacement(&st))
+	require.NoDirExists(t, staged)
+	require.FileExists(t, filepath.Join(destination, "CLAUDE.md"))
 	require.NoFileExists(t, journal)
 }
 

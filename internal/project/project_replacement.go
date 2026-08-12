@@ -13,7 +13,7 @@ import (
 	"github.com/nathanclairmonte/lore/internal/state"
 )
 
-const projectReplacementVersion = 1
+const projectReplacementVersion = 2
 
 type projectReplacementRecord struct {
 	Version      int                      `json:"version"`
@@ -31,12 +31,22 @@ type projectReplacementItem struct {
 	Staged      string `json:"staged"`
 	Backup      string `json:"backup"`
 	HadOriginal bool   `json:"had_original"`
+	Copied      bool   `json:"copied"`
 	Published   bool   `json:"published"`
 }
 
 type projectReplacementTransaction struct {
 	path   string
 	record projectReplacementRecord
+}
+
+type projectReplacementPublication struct {
+	project      string
+	checkout     string
+	syncBase     string
+	replacePaths []string
+	agentDirs    []string
+	replacements []reconcile.TreeReplacement
 }
 
 func projectReplacementPath() (string, error) {
@@ -47,8 +57,8 @@ func projectReplacementPath() (string, error) {
 	return filepath.Join(filepath.Dir(statePath), "project-replacement.json"), nil
 }
 
-func publishPullReplacements(plan pullPlan, head string) (*projectReplacementTransaction, error) {
-	if len(plan.replacements) == 0 {
+func publishProjectReplacements(publication projectReplacementPublication) (*projectReplacementTransaction, error) {
+	if len(publication.replacements) == 0 {
 		return nil, nil
 	}
 	path, err := projectReplacementPath()
@@ -56,32 +66,36 @@ func publishPullReplacements(plan pullPlan, head string) (*projectReplacementTra
 		return nil, err
 	}
 	if _, err := os.Lstat(path); err == nil {
-		return nil, lerr.New(lerr.CodeInconsistency, "an interrupted project replacement must be recovered before pull")
+		return nil, lerr.New(lerr.CodeInconsistency, "an interrupted project replacement must be recovered before updating project copies")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, lerr.Wrap(lerr.CodeGenericError, err, "cannot inspect project replacement record")
 	}
 
 	record := projectReplacementRecord{
-		Version: projectReplacementVersion, Project: plan.target.name,
-		Checkout: plan.target.path, SyncBase: head,
-		ReplacePaths: append([]string(nil), plan.target.replacePaths...),
-		AgentDirs:    append([]string(nil), plan.dirs...), Items: []projectReplacementItem{},
+		Version: projectReplacementVersion, Project: publication.project,
+		Checkout: publication.checkout, SyncBase: publication.syncBase,
+		ReplacePaths: append([]string(nil), publication.replacePaths...),
+		AgentDirs:    append([]string(nil), publication.agentDirs...), Items: []projectReplacementItem{},
 	}
 	transaction := &projectReplacementTransaction{path: path, record: record}
-	for _, replacement := range plan.replacements {
+	for _, replacement := range publication.replacements {
 		staged, err := reserveProjectSibling(replacement.Destination, reconcile.StagePathPrefix)
 		if err != nil {
-			return nil, transaction.fail(err)
-		}
-		if err := reconcile.CopyTree(replacement.Source, staged); err != nil {
 			return nil, transaction.fail(err)
 		}
 		transaction.record.Items = append(transaction.record.Items, projectReplacementItem{
 			Destination: replacement.Destination, Staged: staged,
 		})
-	}
-	if err := transaction.save(); err != nil {
-		return nil, transaction.fail(err)
+		if err := transaction.save(); err != nil {
+			return nil, transaction.fail(err)
+		}
+		if err := reconcile.CopyTree(replacement.Source, staged); err != nil {
+			return nil, transaction.fail(err)
+		}
+		transaction.record.Items[len(transaction.record.Items)-1].Copied = true
+		if err := transaction.save(); err != nil {
+			return nil, transaction.fail(err)
+		}
 	}
 	for i := range transaction.record.Items {
 		item := &transaction.record.Items[i]
@@ -182,7 +196,7 @@ func (t *projectReplacementTransaction) rollback() error {
 	for i := len(t.record.Items) - 1; i >= 0; i-- {
 		item := t.record.Items[i]
 		backupExists := item.Backup != "" && !pathMissing(item.Backup)
-		needsDestinationRemoval := item.Published || pathMissing(item.Staged)
+		needsDestinationRemoval := item.Published || item.Copied && pathMissing(item.Staged)
 		if needsDestinationRemoval && (item.Backup == "" || backupExists) {
 			if err := os.RemoveAll(item.Destination); err != nil {
 				rollbackErrors = append(rollbackErrors, lerr.Wrap(lerr.CodeInconsistency, err, "cannot remove published project copy"))
@@ -225,6 +239,11 @@ func recoverProjectReplacement(st *state.State) error {
 	var record projectReplacementRecord
 	if err := json.Unmarshal(data, &record); err != nil {
 		return lerr.Wrap(lerr.CodeInconsistency, err, "cannot decode interrupted project replacement")
+	}
+	if record.Version == 1 {
+		for i := range record.Items {
+			record.Items[i].Copied = true
+		}
 	}
 	if err := validateProjectReplacement(record); err != nil {
 		return err
@@ -273,7 +292,7 @@ func detectOrphanProjectReplacementPaths(paths []string) error {
 }
 
 func validateProjectReplacement(record projectReplacementRecord) error {
-	if record.Version != projectReplacementVersion || record.Project == "" || record.Checkout == "" || record.SyncBase == "" || len(record.Items) == 0 {
+	if (record.Version != 1 && record.Version != projectReplacementVersion) || record.Project == "" || record.Checkout == "" || record.SyncBase == "" || len(record.Items) == 0 {
 		return lerr.New(lerr.CodeInconsistency, "invalid interrupted project replacement record")
 	}
 	for _, item := range record.Items {
@@ -288,7 +307,7 @@ func validateProjectReplacement(record projectReplacementRecord) error {
 
 func publicationLooksComplete(items []projectReplacementItem) bool {
 	for _, item := range items {
-		if !pathMissing(item.Staged) || pathMissing(item.Destination) {
+		if !item.Copied || !pathMissing(item.Staged) || pathMissing(item.Destination) {
 			return false
 		}
 	}

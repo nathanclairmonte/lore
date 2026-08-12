@@ -654,7 +654,11 @@ func pullReplacement(c *central.Central, target pullTarget, dir string) reconcil
 
 func applyPullPlan(st *state.State, head string, plan pullPlan) (PullCheckoutResult, error) {
 	defer cleanupPullPaths(plan.cleanup)
-	transaction, err := publishPullReplacements(plan, head)
+	transaction, err := publishProjectReplacements(projectReplacementPublication{
+		project: plan.target.name, checkout: plan.target.path, syncBase: head,
+		replacePaths: plan.target.replacePaths, agentDirs: plan.dirs,
+		replacements: plan.replacements,
+	})
 	if err != nil {
 		// the replacement rolled back, so the planned per-dir statuses describe
 		// work that never landed.
@@ -745,7 +749,7 @@ func offerCheckoutGitignoreFixes(checkout *PullCheckoutResult) {
 	}
 	for i := range checkout.Dirs {
 		dir := &checkout.Dirs[i]
-		if dir.Unignored && applyGitignorePicker(dir.Name, checkout.Path, repoTop, false) {
+		if dir.Unignored && applyGitignorePicker(dir.Name, checkout.Path, repoTop) {
 			dir.Unignored = false
 		}
 	}
