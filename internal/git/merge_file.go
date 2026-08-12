@@ -13,7 +13,7 @@ func MergeFile(project, base, central []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, lerr.Wrap(lerr.CodeGenericError, err, "cannot create merge workspace")
 	}
-	defer os.RemoveAll(temporary)
+	defer func() { _ = os.RemoveAll(temporary) }()
 
 	paths := []string{
 		filepath.Join(temporary, "project"),
