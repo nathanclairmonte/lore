@@ -1,0 +1,65 @@
+name: smoke
+
+# shared by release-check.yml and release.yml so both paths verify the exact
+# same targets and assertions. adding a platform here covers both callers.
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: Name of the uploaded artifact holding the release archives
+        required: true
+        type: string
+      expected-version:
+        description: Exact release version, with or without a leading v
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+          - runner: macos-15-intel
+            goos: darwin
+            goarch: amd64
+          - runner: macos-15
+            goos: darwin
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: download release archives
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist
+      - name: execute packaged binary
+        env:
+          EXPECTED_VERSION: ${{ inputs.expected-version }}
+          TARGET_GOOS: ${{ matrix.goos }}
+          TARGET_GOARCH: ${{ matrix.goarch }}
+        run: |
+          archive="$(find dist -maxdepth 1 -type f -name "lore_*_${TARGET_GOOS}_${TARGET_GOARCH}.tar.gz" -print -quit)"
+          test -n "$archive"
+          unpacked="$(mktemp -d)"
+          trap 'rm -rf "$unpacked"' EXIT
+          tar -xzf "$archive" -C "$unpacked"
+          version_output="$("$unpacked/lore" --version)"
+          version="${version_output#lore version }"
+          test "$version_output" = "lore version $version"
+          test "$version" != "devel"
+          if [ -n "$EXPECTED_VERSION" ]; then
+            test "$version" = "${EXPECTED_VERSION#v}"
+          fi
+          test "$("$unpacked/lore" --version --json)" = "{\"version\":\"$version\"}"
+          "$unpacked/lore" --help >/dev/null

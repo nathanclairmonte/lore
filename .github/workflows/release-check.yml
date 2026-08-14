@@ -1,0 +1,57 @@
+name: release check
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GORELEASER_VERSION: v2.17.1
+
+jobs:
+  build:
+    name: build release snapshot
+    runs-on: ubuntu-24.04
+    steps:
+      - name: check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.25.12
+      - name: run tests
+        run: go test ./...
+      - name: validate GoReleaser configuration
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: ${{ env.GORELEASER_VERSION }}
+          args: check
+      - name: build release snapshot
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --snapshot --clean
+      - name: upload release snapshot
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-snapshot
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  smoke:
+    name: smoke
+    needs: build
+    uses: ./.github/workflows/smoke.yml
+    with:
+      artifact-name: release-snapshot
