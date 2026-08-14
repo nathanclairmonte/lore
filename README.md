@@ -4,17 +4,70 @@ A CLI for keeping per-project agentic AI context version-controlled in a
 single private central repository. Projects keep real local copies. Lore
 reconciles those copies with central without exposing central's Git state.
 
-Status: early development.
+Status: preparing the first release.
 
 ## Supported platforms
 
-Linux and macOS. Windows is not supported natively; use WSL.
+Linux and macOS on amd64 and arm64. Lore follows the Go 1.25 runtime
+baseline: macOS 12 Monterey or newer, and Linux kernel 3.2 or newer. Windows
+is not supported natively. Use WSL.
 
-## Install
+## Install with Go
 
-```
+This method requires Go 1.25 or newer.
+
+```sh
 go install github.com/nathanclairmonte/lore/cmd/lore@latest
+lore --version
 ```
+
+## Install a prebuilt binary
+
+Each [GitHub Release](https://github.com/nathanclairmonte/lore/releases)
+contains one archive for each supported operating system and architecture.
+Download the matching archive and `checksums.txt`. Then verify and install it:
+
+```sh
+archive=lore_0.1.0_darwin_arm64.tar.gz
+grep " $archive$" checksums.txt | shasum -a 256 -c - &&
+tmp="$(mktemp -d)" &&
+tar -xzf "$archive" -C "$tmp" &&
+mkdir -p "$HOME/.local/bin" &&
+install -m 0755 "$tmp/lore" "$HOME/.local/bin/lore" &&
+rm -rf "$tmp" &&
+"$HOME/.local/bin/lore" --version
+```
+
+Replace the archive name with the version, operating system, and architecture
+you downloaded. Linux users can use `sha256sum -c -` instead of
+`shasum -a 256 -c -`. The archive holds `lore`, `README.md`, and `LICENSE` at
+its root, so it is extracted into a temporary directory to keep it from
+overwriting files in your current directory. Add `$HOME/.local/bin` to your
+`PATH` if it is not there already, so you can run `lore` by name.
+
+GitHub also records build provenance for every archive. If you use the GitHub
+CLI, verify it with:
+
+```sh
+gh attestation verify "$archive" -R nathanclairmonte/lore
+```
+
+The macOS archives are not signed or notarized by Apple. macOS can require you
+to approve the downloaded binary before its first run. Use the Go installation
+method if you do not want to approve an unsigned download.
+
+Automation can use `lore --version --json`, which emits a stable
+`{"version":"<version>"}` envelope.
+
+## Upgrade
+
+For a Go installation, rerun the `go install` command above. For a prebuilt
+installation, download the desired newer release, verify it, and replace the
+existing `lore` binary.
+
+Lore follows Semantic Versioning. Patch releases remain compatible. Before
+`v1.0.0`, minor releases can contain documented breaking changes. Lore will
+provide migrations when stored configuration or state formats change.
 
 ## Quick start
 
@@ -61,6 +114,8 @@ task build      # produce ./bin/lore via go build (exercises the prod compile pa
 task test       # run the Go test suite
 task lint       # run golangci-lint with the default linter set
 task clean      # remove ./bin
+task release:check     # validate the GoReleaser configuration
+task release:snapshot  # build unpublished release archives in ./dist
 ```
 
 ### Moving the repo
