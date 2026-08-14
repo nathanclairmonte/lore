@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/nathanclairmonte/lore/internal/output"
+	"github.com/nathanclairmonte/lore/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -21,6 +22,7 @@ func newRootCmd() *cobra.Command {
 	var (
 		jsonFlag    bool
 		noColorFlag bool
+		versionFlag bool
 	)
 	var pushCommand *cobra.Command
 	root := &cobra.Command{
@@ -43,9 +45,22 @@ func newRootCmd() *cobra.Command {
 				output.SetMode(output.ModeHuman)
 			}
 			output.SetNoColor(noColorFlag)
+			if versionFlag || cmd.Parent() == nil {
+				return
+			}
 			surfacePendingPushFailure(cmd, pushCommand)
 		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if versionFlag {
+				output.PrintVersion(version.String())
+				return nil
+			}
+			return cmd.Help()
+		},
 	}
+	// keep this flag local because cobra's built-in version path skips output
+	// mode selection, while a persistent flag would be accepted by subcommands
+	root.Flags().BoolVar(&versionFlag, "version", false, "Print version information")
 	root.PersistentFlags().BoolVar(&jsonFlag, "json", false,
 		"Emit machine-readable JSON instead of human-formatted output")
 	root.PersistentFlags().BoolVar(&noColorFlag, "no-color", false,

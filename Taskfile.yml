@@ -47,6 +47,7 @@ tasks:
     cmds:
       - task: lint
       - task: test
+      - task: release:check
   lint:
     desc: Run golangci-lint with default linter set
     cmds:
@@ -55,6 +56,23 @@ tasks:
     desc: Run the Go test suite
     cmds:
       - go test ./...
+
+  # release validation
+  release:check:
+    desc: Validate the GoReleaser configuration
+    cmds:
+      - goreleaser check
+  release:validate-tag:
+    desc: Validate an annotated release tag before pushing it
+    requires:
+      vars:
+        - TAG
+    cmds:
+      - ./scripts/validate-release-tag.sh "{{.TAG}}"
+  release:snapshot:
+    desc: Build an unpublished release snapshot in ./dist
+    cmds:
+      - goreleaser release --snapshot --clean
 
   # manual smoke testing
   smoke:picker-reset:
