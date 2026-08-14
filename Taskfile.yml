@@ -62,6 +62,24 @@ tasks:
     desc: Validate the GoReleaser configuration
     cmds:
       - goreleaser check
+  release:prepare:
+    desc: Check, build, and tag a release without publishing it
+    requires:
+      vars:
+        - VERSION
+    env:
+      LORE_RELEASE_VERSION: "{{.VERSION}}"
+    cmds:
+      - ./scripts/release.sh prepare "$LORE_RELEASE_VERSION"
+  release:publish:
+    desc: Push a prepared release tag and start publication
+    requires:
+      vars:
+        - VERSION
+    env:
+      LORE_RELEASE_VERSION: "{{.VERSION}}"
+    cmds:
+      - ./scripts/release.sh publish "$LORE_RELEASE_VERSION"
   release:validate-tag:
     desc: Validate an annotated release tag before pushing it
     requires:

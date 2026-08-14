@@ -43,18 +43,22 @@ Enable immutable releases in the GitHub repository settings before publishing
 `v0.1.0`. Published tags and assets must not change. Publish a new patch version
 for every correction.
 
-## Validate locally
+## Prepare
 
 Start from a clean checkout of `main` with the pinned mise tools installed:
 
 ```sh
 mise install
-task check
-task release:snapshot
+task release:prepare VERSION=0.1.0
 ```
 
-Inspect the four archives and `dist/checksums.txt`. A snapshot never creates a
-Git tag or GitHub Release.
+The preparation task requires local `main` to exactly match `origin/main`. It
+fetches remote references, runs the complete check and snapshot build, creates
+the annotated tag, and validates it. It does not push the tag or publish
+anything.
+
+Inspect the four archives and `dist/checksums.txt`. A snapshot and a local tag do
+not create a GitHub Release.
 
 ## Publish
 
@@ -62,15 +66,14 @@ Confirm that `main` contains the intended release commit and that the release
 check workflow passed. Creating and pushing the tag is the publication
 decision.
 
-For `v0.1.0`, refresh the remote references, create an annotated tag, and
-validate it before pushing:
+Review the snapshot outputs. Then publish the prepared release:
 
 ```sh
-git fetch origin main --tags
-git tag -a v0.1.0 -m "v0.1.0"
-task release:validate-tag TAG=v0.1.0
-git push origin v0.1.0
+task release:publish VERSION=0.1.0
 ```
+
+The publication task repeats the repository and tag checks. It requires you to
+type the complete tag before it pushes the tag and starts the workflow.
 
 The workflow rejects malformed versions, lightweight tags, and commits that
 are not reachable from `main`. It then performs these steps:
