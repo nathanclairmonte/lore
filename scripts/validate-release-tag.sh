@@ -21,6 +21,10 @@ if [[ "$version_without_build" == *-* ]]; then
   done
 fi
 
+if [ "$main_ref" = "--version-only" ]; then
+  exit 0
+fi
+
 if ! git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
   echo "release tag does not exist: $tag" >&2
   exit 1
